@@ -1,4 +1,5 @@
 mod crypto;
+mod detect;
 mod flash;
 mod ofp;
 mod ofp_mtk;
@@ -8,7 +9,7 @@ mod ozip;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use crypto::KeyConfig;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -24,13 +25,32 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Quick-mode: Path to an .ozip file to decrypt directly without specifying 'ozip' subcommand
-    #[arg(value_name = "OZIP_FILE")]
+    /// Quick-mode: Path to a firmware file to auto-detect and extract directly
+    #[arg(value_name = "FIRMWARE_FILE")]
     direct_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Universal zero-config auto-detection and extraction (.ozip, .ofp, .ops, .zip)
+    Extract {
+        /// Path to firmware file
+        input: PathBuf,
+        /// Directory to extract decrypted partitions or target .zip
+        #[arg(short, long)]
+        out_dir: Option<PathBuf>,
+        /// Optional single partition to extract (e.g., "modem" or "boot")
+        #[arg(short, long)]
+        partition: Option<String>,
+        /// Automatically sideload via ADB if the resulting output is a .zip
+        #[arg(long)]
+        sideload: bool,
+    },
+    /// Inspect and diagnose firmware container format, signature, and encryption parameters
+    Info {
+        /// Path to firmware file to inspect
+        input: PathBuf,
+    },
     /// Decrypt an Oppo/Realme .ozip file to a standard .zip archive (and optionally sideload it)
     Ozip {
         /// Input .ozip firmware file
@@ -79,6 +99,20 @@ fn main() -> Result<()> {
     let key_config = KeyConfig::load_or_default(&cli.keys)?;
 
     match (cli.command, cli.direct_file) {
+        (
+            Some(Commands::Extract {
+                input,
+                out_dir,
+                partition,
+                sideload,
+            }),
+            _,
+        ) => {
+            handle_extract(&input, out_dir.as_deref(), partition.as_deref(), sideload, &key_config)?;
+        }
+        (Some(Commands::Info { input }), _) => {
+            handle_info(&input)?;
+        }
         (
             Some(Commands::Ozip {
                 input,
@@ -145,8 +179,36 @@ fn main() -> Result<()> {
             flash::adb_sideload(&zip_file)?;
         }
         (None, Some(input)) => {
-            // Quick direct OZIP decryption mode
-            let out_path = if input.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false) {
+            // Quick direct mode: Auto-detect container and extract seamlessly
+            handle_extract(&input, None, None, false, &key_config)?;
+        }
+        (None, None) => {
+            println!("ozipdecrypt-tools {}\n", env!("CARGO_PKG_VERSION"));
+            println!("Usage:\n    ozipdecrypt-tools <command> [OPTIONS]\n    ozipdecrypt-tools <firmware_file>\n");
+            println!("Commands:\n    extract     Universal auto-detection and extraction (.ozip/.ofp/.ops)\n    info        Inspect and diagnose firmware container metadata\n    ozip        Decrypt .ozip to .zip archive\n    ofp         Extract Qualcomm/MediaTek .ofp firmware archive\n    ops         Extract OnePlus .ops firmware archive\n    sideload    Sideload .zip update via ADB\n");
+            println!("Run 'ozipdecrypt-tools --help' for full options.");
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_extract(
+    input: &Path,
+    out_dir: Option<&Path>,
+    partition: Option<&str>,
+    sideload: bool,
+    key_config: &KeyConfig,
+) -> Result<()> {
+    let container_type = detect::detect_container(input)?;
+    println!("[*] Analyzing container format for {}...", input.display());
+    println!("[+] Identified: {}", container_type);
+
+    match container_type {
+        detect::ContainerType::Ozip => {
+            let out_path = if let Some(dir) = out_dir {
+                dir.join(format!("{}.zip", input.file_stem().and_then(|s| s.to_str()).unwrap_or("firmware")))
+            } else if input.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false) {
                 input.with_file_name(format!(
                     "{}.decrypted.zip",
                     input.file_stem().and_then(|s| s.to_str()).unwrap_or("firmware")
@@ -154,16 +216,66 @@ fn main() -> Result<()> {
             } else {
                 input.with_extension("zip")
             };
-            ozip::decrypt_ozip(&input, &out_path, &key_config)?;
+            ozip::decrypt_ozip(input, &out_path, key_config)?;
+            if sideload {
+                flash::adb_sideload(&out_path)?;
+            }
         }
-        (None, None) => {
-            println!("ozipdecrypt-tools {}\n", env!("CARGO_PKG_VERSION"));
-            println!("Usage:\n    ozipdecrypt-tools <command> [OPTIONS]\n    ozipdecrypt-tools <filename.ozip>\n");
-            println!("Commands:\n    ozip        Decrypt .ozip to .zip archive\n    ofp         Extract Qualcomm/MediaTek .ofp firmware archive\n    ops         Extract OnePlus .ops firmware archive\n    sideload    Sideload .zip update via ADB\n");
-            println!("Run 'ozipdecrypt-tools --help' for full options.");
+        detect::ContainerType::OfpQualcomm => {
+            let default_dir = PathBuf::from("./extracted_ofp");
+            let target_dir = out_dir.unwrap_or(&default_dir);
+            match ofp::extract_ofp_partition(input, target_dir, partition, key_config) {
+                Ok(()) => {}
+                Err(qc_err) => {
+                    println!("[*] Qualcomm OFP extraction did not match, falling back to MediaTek...");
+                    if let Err(mtk_err) = ofp_mtk::extract_ofp_mtk(input, target_dir, partition) {
+                        bail!(
+                            "Failed to extract OFP archive as Qualcomm or MediaTek:\n\
+                             - Qualcomm: {}\n\
+                             - MediaTek: {}",
+                            qc_err, mtk_err
+                        );
+                    }
+                }
+            }
+        }
+        detect::ContainerType::OfpMediaTek => {
+            let default_dir = PathBuf::from("./extracted_mtk");
+            let target_dir = out_dir.unwrap_or(&default_dir);
+            ofp_mtk::extract_ofp_mtk(input, target_dir, partition)?;
+        }
+        detect::ContainerType::OnePlusOps => {
+            let default_dir = PathBuf::from("./extracted_ops");
+            let target_dir = out_dir.unwrap_or(&default_dir);
+            ops::extract_ops(input, target_dir, partition)?;
+        }
+        detect::ContainerType::StandardZip => {
+            println!("[+] File is already a standard unencrypted ZIP archive.");
+            if sideload {
+                flash::adb_sideload(input)?;
+            } else {
+                println!("[*] Pass '--sideload' to automatically flash this update via ADB.");
+            }
+        }
+        detect::ContainerType::Unknown => {
+            bail!(
+                "Unrecognized container format for '{}'. Please verify the file or specify a subcommand (ozip, ofp, ops).",
+                input.display()
+            );
         }
     }
 
+    Ok(())
+}
+
+fn handle_info(input: &Path) -> Result<()> {
+    let info = detect::describe_container(input)?;
+    println!("\n=== Firmware Container Diagnostic ===");
+    println!("File:         {}", input.display());
+    println!("Size:         {:.2} MB ({} bytes)", info.file_size as f64 / (1024.0 * 1024.0), info.file_size);
+    println!("Format:       {}", info.container_type);
+    println!("Description:  {}", info.details);
+    println!("=====================================\n");
     Ok(())
 }
 
@@ -431,5 +543,29 @@ mod tests {
         assert_eq!(items[1].start, 200 * 0x200);
         assert_eq!(items[1].length, 67108864);
         assert!(!items[1].is_encrypted);
+    }
+
+    #[test]
+    fn test_detect_ozip_magic() {
+        let tmp_dir = std::env::temp_dir();
+        let test_ozip = tmp_dir.join("test_detect_sample.ozip");
+        let mut data = vec![0u8; 256];
+        data[0..12].copy_from_slice(b"OPPOENCRYPT!");
+        std::fs::write(&test_ozip, &data).unwrap();
+
+        let detected = detect::detect_container(&test_ozip).unwrap();
+        let _ = std::fs::remove_file(&test_ozip);
+        assert_eq!(detected, detect::ContainerType::Ozip);
+    }
+
+    #[test]
+    fn test_detect_unknown() {
+        let tmp_dir = std::env::temp_dir();
+        let test_unknown = tmp_dir.join("test_detect_sample.bin");
+        std::fs::write(&test_unknown, b"RANDOM_NON_CONTAINER_DATA_BYTES_EXCEEDING_MINIMUM_LENGTH_FOR_DETECTION_CHECK_128_BYTES_PADDING_PAD_PAD_PAD_PAD_PAD_PAD_PAD_PAD_PAD_PAD").unwrap();
+
+        let detected = detect::detect_container(&test_unknown).unwrap();
+        let _ = std::fs::remove_file(&test_unknown);
+        assert_eq!(detected, detect::ContainerType::Unknown);
     }
 }

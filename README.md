@@ -30,16 +30,33 @@ The optimized binary will be compiled to `target/release/ozipdecrypt-tools` (or 
 
 ---
 
-## Usage
+## Quick Start (Zero-Config Auto-Detection)
+
+`ozipdecrypt-tools` automatically detects the container format (`.ozip`, Qualcomm `.ofp`, MediaTek `.ofp`, OnePlus `.ops`, or standard `.zip`) and dispatches the appropriate decryption engine without needing manual flags:
+
+```bash
+# Auto-detects and extracts ANY container directly
+ozipdecrypt-tools firmware.ozip
+ozipdecrypt-tools CPH1901EX_11_A.16.ofp
+ozipdecrypt-tools OnePlus7Pro.ops
+
+# Or explicitly via the extract command:
+ozipdecrypt-tools extract firmware.ofp --partition modem
+```
+
+### Inspect Container Metadata (`info`)
+
+```bash
+# Inspect container header, signature magic, and encryption specifications
+ozipdecrypt-tools info firmware.ofp
+```
+
+---
+
+## Detailed Command Usage
 
 ### 1. Decrypt an `.ozip` File
 
-Direct decryption:
-```bash
-ozipdecrypt-tools <filename.ozip>
-```
-
-Or using the `ozip` subcommand:
 ```bash
 # Decrypt to default <filename.zip>
 ozipdecrypt-tools ozip CPH1901_OTA.ozip
