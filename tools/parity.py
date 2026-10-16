@@ -59,36 +59,56 @@ def verify_ops_synthetic(root: Path, rust_bin: Path, work_dir: Path) -> bool:
 
     import opscrypto
 
-    # Deterministic test payload (64 KB partition)
-    payload_len = 65536
-    raw_payload = bytes([(i * 3 + 7) % 256 for i in range(payload_len)])
-    
-    # Encrypt with MBOX5 using opscrypto
+    def pad_sha256(data: bytes) -> str:
+        p = 0x1000 - (len(data) % 0x1000) if len(data) % 0x1000 != 0 else 0
+        return hashlib.sha256(data + b"\x00" * p).hexdigest()
+
+    # Deterministic test partitions:
+    # 1. 64 KB partition (standard chunk boundary)
+    # 2. 64 KB + 13 bytes partition (multi-chunk with non-multiple-of-16 tail)
+    # 3. 7 bytes partition (< 16 bytes, S-box key schedule)
+    items = [
+        ("test_modem.img", bytes([(i * 3 + 7) % 256 for i in range(65536)])),
+        ("test_tail.img", bytes([(i * 5 + 19) % 256 for i in range(65536 + 13)])),
+        ("test_short.img", bytes([(i * 7 + 13) % 256 for i in range(7)])),
+    ]
+
     opscrypto.mbox = opscrypto.mbox5
-    enc_payload = opscrypto.key_custom(raw_payload, opscrypto.key, 0, True)
+
+    container = bytearray()
+    xml_entries = []
+
+    for name, raw in items:
+        sector_start = len(container) // 0x200
+        enc = opscrypto.key_custom(raw, opscrypto.key[:], 0, True)
+        container.extend(enc)
+        if len(container) % 0x200 != 0:
+            container.extend(b"\x00" * (0x200 - (len(container) % 0x200)))
+        digest = pad_sha256(raw)
+        xml_entries.append(
+            f'        <File Path="{name}" FileOffsetInSrc="{sector_start}" SizeInByteInSrc="{len(raw)}" Sha256="{digest}"/>'
+        )
 
     xml_content = (
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<data>\n'
         '    <Sahara>\n'
-        '        <File Path="test_modem.img" FileOffsetInSrc="0" SizeInByteInSrc="65536" '
-        f'Sha256="{hashlib.sha256(raw_payload).hexdigest()}"/>\n'
+        + '\n'.join(xml_entries) + '\n'
         '    </Sahara>\n'
         '</data>'
     ).encode("utf-8")
 
     xml_len = len(xml_content)
     xml_pad = 0x200 - (xml_len % 0x200) if xml_len % 0x200 != 0 else 0
-    enc_xml = opscrypto.key_custom(xml_content + b"\x00" * xml_pad, opscrypto.key, 0, True)
+    enc_xml = opscrypto.key_custom(xml_content + b"\x00" * xml_pad, opscrypto.key[:], 0, True)
 
-    # Build OPS container: [enc_payload (64KB)] + [enc_xml] + [trailer (0x200)]
     trailer = bytearray(0x200)
     trailer[0x18:0x1C] = xml_len.to_bytes(4, "little")
     trailer[0x1fc:0x200] = (0x9EE3B5D1).to_bytes(4, "little")
 
     ops_fixture = work_dir / "synthetic_test.ops"
     with open(ops_fixture, "wb") as f:
-        f.write(enc_payload)
+        f.write(container)
         f.write(enc_xml)
         f.write(trailer)
 
@@ -102,22 +122,23 @@ def verify_ops_synthetic(root: Path, rust_bin: Path, work_dir: Path) -> bool:
         print(f"[FAIL] Rust extraction failed with error:\n{res.stderr}\n{res.stdout}")
         return False
 
-    rust_extracted = rust_out / "test_modem.img"
-    if not rust_extracted.exists():
-        print(f"[FAIL] Rust did not produce expected file: {rust_extracted}")
-        return False
+    for name, raw in items:
+        rust_extracted = rust_out / name
+        if not rust_extracted.exists():
+            print(f"[FAIL] Rust did not produce expected file: {rust_extracted}")
+            return False
 
-    rust_hash = sha256_file(rust_extracted)
-    expected_hash = hashlib.sha256(raw_payload).hexdigest()
+        rust_hash = sha256_file(rust_extracted)
+        expected_hash = hashlib.sha256(raw).hexdigest()
+        print(f"[*] Partition '{name}' ({len(raw)} bytes):")
+        print(f"    Expected SHA-256: {expected_hash}")
+        print(f"    Rust CLI SHA-256: {rust_hash}")
 
-    print(f"[*] Expected SHA-256: {expected_hash}")
-    print(f"[*] Rust CLI SHA-256: {rust_hash}")
+        if rust_hash != expected_hash:
+            print(f"[FAIL] SHA-256 mismatch on extracted partition {name}!")
+            return False
 
-    if rust_hash != expected_hash:
-        print("[FAIL] SHA-256 mismatch on extracted partition!")
-        return False
-
-    print("[SUCCESS] OPS Synthetic container extracted with 100% SHA-256 bit-for-bit parity!")
+    print("[SUCCESS] All OPS synthetic partitions extracted with 100% SHA-256 bit-for-bit parity!")
     return True
 
 def main():

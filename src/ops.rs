@@ -198,6 +198,7 @@ pub fn key_custom_decrypt_chunk(
     mut rkey: [u32; 4],
     mbox: &[u32],
     sbox: &[u8],
+    is_whole_input_short: bool,
 ) -> (Vec<u8>, [u32; 4]) {
     let mut outp = Vec::with_capacity(inp.len());
     let mut ptr = 0;
@@ -218,7 +219,7 @@ pub fn key_custom_decrypt_chunk(
     }
 
     if remaining > 0 {
-        if ptr == 0 {
+        if is_whole_input_short {
             let sbox_words: Vec<u32> = sbox.iter().map(|&b| b as u32).collect();
             rkey = key_update(rkey, &sbox_words, sbox);
         } else {
@@ -243,7 +244,7 @@ pub fn key_custom_decrypt_chunk(
 }
 
 pub fn key_custom_decrypt(inp: &[u8], rkey: [u32; 4], mbox: &[u32], sbox: &[u8]) -> Vec<u8> {
-    key_custom_decrypt_chunk(inp, rkey, mbox, sbox).0
+    key_custom_decrypt_chunk(inp, rkey, mbox, sbox, inp.len() < 16).0
 }
 
 #[derive(Debug)]
@@ -305,11 +306,17 @@ pub fn extract_ops(ops_path: &Path, out_dir: &Path, target_partition: Option<&st
             let mut rkey = MASTER_KEY;
             let chunk_size = 64 * 1024usize;
             let mut in_buf = vec![0u8; chunk_size];
+            let is_whole_input_short = item.length < 16;
             while remaining > 0 {
                 let to_read = std::cmp::min(remaining, chunk_size as u64) as usize;
                 file.read_exact(&mut in_buf[..to_read])?;
-                let (plain, next_rkey) =
-                    key_custom_decrypt_chunk(&in_buf[..to_read], rkey, matched_mbox, &sbox_bytes);
+                let (plain, next_rkey) = key_custom_decrypt_chunk(
+                    &in_buf[..to_read],
+                    rkey,
+                    matched_mbox,
+                    &sbox_bytes,
+                    is_whole_input_short,
+                );
                 out.write_all(&plain)?;
                 rkey = next_rkey;
                 remaining -= to_read as u64;

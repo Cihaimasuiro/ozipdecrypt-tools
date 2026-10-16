@@ -328,6 +328,7 @@ mod tests {
     use aes::cipher::{BlockEncrypt, KeyInit};
     use aes::Aes128;
     use crypto::{derive_ofp_qc_key_iv, key_shuffle, swap_nibbles, OfpKeyTriplet};
+    use sha2::{Digest, Sha256};
     use std::io::Cursor;
 
     #[test]
@@ -738,8 +739,13 @@ mod tests {
         let enc5_first_16 = [
             54u8, 26, 231, 63, 13, 155, 106, 150, 62, 165, 3, 60, 167, 43, 187, 68,
         ];
-        let (dec, _rkey) =
-            ops::key_custom_decrypt_chunk(&enc5_first_16, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        let (dec, _rkey) = ops::key_custom_decrypt_chunk(
+            &enc5_first_16,
+            ops::MASTER_KEY,
+            &ops::MBOX5,
+            &sbox,
+            false,
+        );
         let expected_plain: Vec<u8> = (0u8..16).collect();
         assert_eq!(
             dec, expected_plain,
@@ -750,10 +756,46 @@ mod tests {
         let cipher7: Vec<u8> = (0..7).map(|i| ((i * 7 + 13) % 256) as u8).collect();
         let expected7 = [72u8, 139, 132, 7, 104, 83, 225];
         let (dec7, _rkey) =
-            ops::key_custom_decrypt_chunk(&cipher7, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+            ops::key_custom_decrypt_chunk(&cipher7, ops::MASTER_KEY, &ops::MBOX5, &sbox, true);
         assert_eq!(
             dec7, expected7,
             "OPS 7-byte stream decrypt vector mismatch for MBOX5"
+        );
+
+        // 15-byte vector (< 16 bytes total, uses S-box key schedule)
+        let cipher15: Vec<u8> = (0..15).map(|i| ((i * 7 + 13) % 256) as u8).collect();
+        let expected15 = [
+            72u8, 139, 132, 7, 104, 83, 225, 223, 7, 215, 161, 189, 24, 200, 37,
+        ];
+        let (dec15, _rkey) =
+            ops::key_custom_decrypt_chunk(&cipher15, ops::MASTER_KEY, &ops::MBOX5, &sbox, true);
+        assert_eq!(
+            dec15, expected15,
+            "OPS 15-byte stream decrypt vector mismatch for MBOX5"
+        );
+
+        // 16-byte vector (full 16-byte block, uses MBOX)
+        let cipher16: Vec<u8> = (0..16).map(|i| ((i * 7 + 13) % 256) as u8).collect();
+        let expected16 = [
+            59u8, 15, 254, 30, 32, 174, 91, 175, 115, 224, 90, 109, 202, 78, 218, 61,
+        ];
+        let (dec16, _rkey) =
+            ops::key_custom_decrypt_chunk(&cipher16, ops::MASTER_KEY, &ops::MBOX5, &sbox, false);
+        assert_eq!(
+            dec16, expected16,
+            "OPS 16-byte stream decrypt vector mismatch for MBOX5"
+        );
+
+        // 17-byte vector (16-byte block + 1-byte tail, uses MBOX because whole input >= 16)
+        let cipher17: Vec<u8> = (0..17).map(|i| ((i * 7 + 13) % 256) as u8).collect();
+        let expected17 = [
+            59u8, 15, 254, 30, 32, 174, 91, 175, 115, 224, 90, 109, 202, 78, 218, 61, 36,
+        ];
+        let (dec17, _rkey) =
+            ops::key_custom_decrypt_chunk(&cipher17, ops::MASTER_KEY, &ops::MBOX5, &sbox, false);
+        assert_eq!(
+            dec17, expected17,
+            "OPS 17-byte stream decrypt vector mismatch for MBOX5"
         );
 
         // 20-byte vector (16-byte block + 4-byte tail) generated with Python opscrypto.py
@@ -763,7 +805,7 @@ mod tests {
             83,
         ];
         let (dec20, _rkey) =
-            ops::key_custom_decrypt_chunk(&cipher20, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+            ops::key_custom_decrypt_chunk(&cipher20, ops::MASTER_KEY, &ops::MBOX5, &sbox, false);
         assert_eq!(
             dec20, expected20,
             "OPS 20-byte stream decrypt tail vector mismatch for MBOX5"
@@ -779,10 +821,76 @@ mod tests {
         )
         .unwrap();
         let (dec100, _rkey) =
-            ops::key_custom_decrypt_chunk(&cipher100, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+            ops::key_custom_decrypt_chunk(&cipher100, ops::MASTER_KEY, &ops::MBOX5, &sbox, false);
         assert_eq!(
             dec100, expected100,
             "OPS 100-byte stream decrypt tail vector mismatch for MBOX5"
+        );
+
+        // 65536 + 15 byte vector against upstream output (both single-call and chunked)
+        let cipher65536_15: Vec<u8> = (0..(65536 + 15))
+            .map(|i| ((i * 7 + 13) % 256) as u8)
+            .collect();
+        let (c1, r1) = ops::key_custom_decrypt_chunk(
+            &cipher65536_15[..65536],
+            ops::MASTER_KEY,
+            &ops::MBOX5,
+            &sbox,
+            false,
+        );
+        let (c2, _) =
+            ops::key_custom_decrypt_chunk(&cipher65536_15[65536..], r1, &ops::MBOX5, &sbox, false);
+        let mut chunked65536_15 = c1;
+        chunked65536_15.extend_from_slice(&c2);
+
+        let single65536_15 =
+            ops::key_custom_decrypt(&cipher65536_15, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        assert_eq!(
+            chunked65536_15, single65536_15,
+            "Chunked 64KB+15 output must match single-call decrypt"
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(&chunked65536_15);
+        let digest = format!("{:x}", hasher.finalize());
+        assert_eq!(
+            digest,
+            "7d0da28273b31f098a153669f80f8902f2b8edff0b8c1cfbf12ab6a872150966"
+        );
+        assert_eq!(
+            &chunked65536_15[65536..],
+            &[82u8, 69, 157, 154, 107, 43, 228, 215, 49, 176, 83, 29, 255, 153, 31]
+        );
+    }
+
+    #[test]
+    fn test_ops_chunked_vs_single_call_decrypt() {
+        let sbox = hex::decode(ops::SBOX_HEX).unwrap();
+        // Test 64 KB + 5 bytes: chunked 64 KB + 5 bytes vs single-call
+        let inp: Vec<u8> = (0..(65536 + 5))
+            .map(|i| ((i * 11 + 3) % 256) as u8)
+            .collect();
+        let single = ops::key_custom_decrypt(&inp, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+
+        let (c1, r1) = ops::key_custom_decrypt_chunk(
+            &inp[..65536],
+            ops::MASTER_KEY,
+            &ops::MBOX5,
+            &sbox,
+            false,
+        );
+        let (c2, _) = ops::key_custom_decrypt_chunk(&inp[65536..], r1, &ops::MBOX5, &sbox, false);
+        let mut chunked = c1;
+        chunked.extend_from_slice(&c2);
+
+        assert_eq!(
+            chunked, single,
+            "64 KB + 5 chunked decrypt must match single-call decrypt"
+        );
+        assert_eq!(
+            &chunked[65536..],
+            &[4u8, 124, 59, 19, 151],
+            "Last 5 bytes must match upstream key_custom"
         );
     }
 
