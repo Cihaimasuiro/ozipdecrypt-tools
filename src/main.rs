@@ -512,13 +512,25 @@ mod tests {
     }
 
     #[test]
-    fn test_ops_key_update() {
+    fn test_ops_key_update_known_answer_vector() {
         let sbox = hex::decode(ops::SBOX_HEX).unwrap();
-        let iv = [0u32; 4];
-        let next_key = ops::key_update(iv, &ops::MBOX5, &sbox);
-        assert_ne!(next_key, [0u32; 4]);
-        let next_key2 = ops::key_update(iv, &ops::MBOX5, &sbox);
-        assert_eq!(next_key, next_key2);
+        let next_key = ops::key_update(ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        assert_eq!(
+            next_key,
+            [0x3CE51B36, 0x916C9E09, 0x3709AC36, 0x4BB526AB],
+            "OPS key_update must exactly match upstream python test vector"
+        );
+    }
+
+    #[test]
+    fn test_safe_join_path_traversal() {
+        let base = PathBuf::from("/tmp/extracted");
+        assert!(crypto::safe_join(&base, "modem.img").is_ok());
+        assert!(crypto::safe_join(&base, "sub/dir/boot.img").is_ok());
+        assert!(crypto::safe_join(&base, "../evil.img").is_err());
+        assert!(crypto::safe_join(&base, "..\\evil.img").is_err());
+        assert!(crypto::safe_join(&base, "/etc/shadow").is_err());
+        assert!(crypto::safe_join(&base, "C:\\Windows\\System32").is_err());
     }
 
     #[test]

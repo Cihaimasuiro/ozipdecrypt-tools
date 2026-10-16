@@ -7,7 +7,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-pub const MASTER_KEY: [u32; 4] = [0x9EE3B5D1, 0x9D04EA5E, 0xABD51D67, 0xAFCBD2BA];
+pub const MASTER_KEY: [u32; 4] = [0x9EE3B5D1, 0x9D04EA5E, 0xABD51D67, 0xAFCBAFD2];
 
 pub const MBOX5: [u32; 62] = [
     0x60, 0x8a, 0x3f, 0x2d, 0x68, 0x6b, 0xd4, 0x23, 0x51, 0x0c, 0xd0, 0x95, 0xbb, 0x40, 0xe9,
@@ -196,7 +196,12 @@ pub fn key_update(iv1: [u32; 4], asbox: &[u32], sbox: &[u8]) -> [u32; 4] {
     ]
 }
 
-pub fn key_custom_decrypt(inp: &[u8], mut rkey: [u32; 4], mbox: &[u32], sbox: &[u8]) -> Vec<u8> {
+pub fn key_custom_decrypt_chunk(
+    inp: &[u8],
+    mut rkey: [u32; 4],
+    mbox: &[u32],
+    sbox: &[u8],
+) -> (Vec<u8>, [u32; 4]) {
     let mut outp = Vec::with_capacity(inp.len());
     let mut ptr = 0;
     let mut remaining = inp.len();
@@ -232,7 +237,11 @@ pub fn key_custom_decrypt(inp: &[u8], mut rkey: [u32; 4], mbox: &[u32], sbox: &[
         }
     }
 
-    outp
+    (outp, rkey)
+}
+
+pub fn key_custom_decrypt(inp: &[u8], rkey: [u32; 4], mbox: &[u32], sbox: &[u8]) -> Vec<u8> {
+    key_custom_decrypt_chunk(inp, rkey, mbox, sbox).0
 }
 
 #[derive(Debug)]
@@ -277,7 +286,7 @@ pub fn extract_ops(ops_path: &Path, out_dir: &Path, target_partition: Option<&st
             item.filename, item.length, item.is_encrypted
         );
 
-        let out_file_path = out_dir.join(&item.filename);
+        let out_file_path = crate::crypto::safe_join(out_dir, &item.filename)?;
         if let Some(parent) = out_file_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -287,11 +296,18 @@ pub fn extract_ops(ops_path: &Path, out_dir: &Path, target_partition: Option<&st
             .with_context(|| format!("Failed to create {}", out_file_path.display()))?;
 
         if item.is_encrypted {
-            // Decrypt using key_custom_decrypt
-            let mut buf = vec![0u8; item.length as usize];
-            file.read_exact(&mut buf)?;
-            let plain = key_custom_decrypt(&buf, MASTER_KEY, matched_mbox, &sbox_bytes);
-            out.write_all(&plain[..item.length as usize])?;
+            let mut remaining = item.length;
+            let mut rkey = MASTER_KEY;
+            let chunk_size = 64 * 1024usize;
+            let mut in_buf = vec![0u8; chunk_size];
+            while remaining > 0 {
+                let to_read = std::cmp::min(remaining, chunk_size as u64) as usize;
+                file.read_exact(&mut in_buf[..to_read])?;
+                let (plain, next_rkey) = key_custom_decrypt_chunk(&in_buf[..to_read], rkey, matched_mbox, &sbox_bytes);
+                out.write_all(&plain)?;
+                rkey = next_rkey;
+                remaining -= to_read as u64;
+            }
         } else {
             // Unencrypted stream copy
             let mut remaining = item.length;
@@ -328,7 +344,10 @@ pub fn extract_ops(ops_path: &Path, out_dir: &Path, target_partition: Option<&st
             if digest_str.eq_ignore_ascii_case(&item.sha256) {
                 println!("  [+] Verified SHA-256 successfully.");
             } else {
-                println!("  [!] SHA-256 mismatch! (computed {}, expected {})", digest_str, item.sha256);
+                bail!(
+                    "SHA-256 verification failed for '{}'! Computed {}, expected {}",
+                    item.filename, digest_str, item.sha256
+                );
             }
         }
 

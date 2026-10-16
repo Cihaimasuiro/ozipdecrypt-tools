@@ -1,10 +1,10 @@
 use aes::cipher::{BlockDecrypt, KeyInit};
 use aes::Aes128;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 pub const DEFAULT_OZIP_KEYS: &[&str] = &[
     "D6EECF0AE5ACD4E0E9FE522DE7CE381E", // mnkey
@@ -226,4 +226,19 @@ pub fn decrypt_blocks(cipher: &Aes128, buf: &mut [u8]) {
         cipher.decrypt_block(&mut block);
         chunk.copy_from_slice(&block);
     }
+}
+
+pub fn safe_join(base: &Path, filename: &str) -> Result<PathBuf> {
+    let clean = filename.trim().replace('\\', "/");
+    let rel = Path::new(&clean);
+    if rel.is_absolute() {
+        bail!("Absolute path rejected in archive entry: '{}'", filename);
+    }
+    for comp in rel.components() {
+        match comp {
+            Component::Normal(_) => {}
+            _ => bail!("Path traversal attempt rejected in archive entry: '{}'", filename),
+        }
+    }
+    Ok(base.join(rel))
 }

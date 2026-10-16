@@ -261,9 +261,18 @@ pub fn extract_ofp_mtk(
             entry.name, entry.filename, entry.length, entry.enc_length
         );
 
-        let out_file_path = out_dir.join(&entry.filename);
+        let out_file_path = crate::crypto::safe_join(out_dir, &entry.filename)?;
         if let Some(parent) = out_file_path.parent() {
             fs::create_dir_all(parent)?;
+        }
+
+        if entry.enc_length > entry.length {
+            bail!(
+                "Corrupted MTK entry '{}': enc_length ({}) exceeds length ({})",
+                entry.filename,
+                entry.enc_length,
+                entry.length
+            );
         }
 
         let mut out = File::create(&out_file_path)
@@ -293,7 +302,7 @@ pub fn extract_ofp_mtk(
         }
 
         // Stream remaining plain partition payload in 2 MB blocks
-        let mut buf = [0u8; 64 * 1024];
+        let mut buf = vec![0u8; 2 * 1024 * 1024];
         while remaining_len > 0 {
             let to_read = std::cmp::min(remaining_len, buf.len() as u64) as usize;
             let n = file.read(&mut buf[..to_read])?;

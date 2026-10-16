@@ -309,8 +309,7 @@ fn extract_single_item(
     key: &[u8; 16],
     iv: &[u8; 16],
 ) -> Result<()> {
-    let clean_rel_path = item.filename.replace('\\', "/");
-    let target_path = out_dir.join(&clean_rel_path);
+    let target_path = crate::crypto::safe_join(out_dir, &item.filename)?;
 
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent)?;
@@ -321,7 +320,7 @@ fn extract_single_item(
         return Ok(());
     }
 
-    println!("[*] Extracting: {} ({} bytes)", clean_rel_path, rlength);
+    println!("[*] Extracting: {} ({} bytes)", item.filename, rlength);
 
     src_file.seek(SeekFrom::Start(item.start))?;
 
@@ -425,8 +424,8 @@ fn verify_checksums(file_path: &Path, sha256_sum: &str, md5_sum: &str, is_copy: 
 
 
     if !md5_verified || !sha256_verified {
-        println!(
-            "  [!] {}: Checksum mismatch! (md5_ok: {}, sha256_ok: {})",
+        bail!(
+            "{}: Checksum verification failed! (md5_ok: {}, sha256_ok: {})",
             mode_str, md5_verified, sha256_verified
         );
     } else {

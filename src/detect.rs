@@ -41,49 +41,14 @@ pub fn detect_container(path: &Path) -> Result<ContainerType> {
         return Ok(ContainerType::Unknown);
     }
 
-    // 1. Check for Standalone OZIP Header
+    // 1. Check for Standalone OZIP Header (OPPOENCRYPT! magic)
     let mut head16 = [0u8; 16];
     file.seek(SeekFrom::Start(0))?;
     if file.read_exact(&mut head16).is_ok() && &head16[0..12] == b"OPPOENCRYPT!" {
         return Ok(ContainerType::Ozip);
     }
 
-    // 2. Check for Standard ZIP / OZIP Mode 1 or 2
-    if &head16[0..4] == b"PK\x03\x04" {
-        // Inspect ZIP structure for OZIP markers
-        if is_zip_ozip(&mut file)? {
-            return Ok(ContainerType::Ozip);
-        } else {
-            return Ok(ContainerType::StandardZip);
-        }
-    }
-
-    // 3. Check for OnePlus OPS Container
-    if file_size > 0x200 {
-        file.seek(SeekFrom::End(-0x200))?;
-        let mut ops_tail = [0u8; 0x200];
-        if file.read_exact(&mut ops_tail).is_ok() {
-            let magic = u32::from_le_bytes(ops_tail[0x1fc..0x200].try_into().unwrap());
-            if magic == 0x9EE3B5D1 || check_ops_manifest(&ops_tail) {
-                return Ok(ContainerType::OnePlusOps);
-            }
-        }
-    }
-
-    // 4. Check for MediaTek OFP Container (Trailer at filesize - 0x6C)
-    if file_size > 0x6C {
-        file.seek(SeekFrom::End(-0x6C))?;
-        let mut mtk_trailer = [0u8; 0x6C];
-        if file.read_exact(&mut mtk_trailer).is_ok() {
-            crate::ofp_mtk::mtk_shuffle(b"geyixue", &mut mtk_trailer);
-            let magic = &mtk_trailer[0..4];
-            if magic == b"MMM\0" || magic == b"MMM\x01" || magic == b"MMM\x02" || check_mtk_patterns(&mtk_trailer) {
-                return Ok(ContainerType::OfpMediaTek);
-            }
-        }
-    }
-
-    // 5. Check for Qualcomm OFP Container
+    // 2. Strict Check for Qualcomm OFP Container (Signature 0x7CEF / 0xCEF7 in trailer)
     for &page_size in &[0x1000u64, 0x200u64] {
         if file_size > page_size {
             file.seek(SeekFrom::End(-(page_size as i64)))?;
@@ -97,14 +62,47 @@ pub fn detect_container(path: &Path) -> Result<ContainerType> {
         }
     }
 
-    // Fallback based on file extension
+    // 3. Strict Check for MediaTek OFP Container (Trailer at filesize - 0x6C decrypted with 'geyixue')
+    if file_size > 0x6C {
+        file.seek(SeekFrom::End(-0x6C))?;
+        let mut mtk_trailer = [0u8; 0x6C];
+        if file.read_exact(&mut mtk_trailer).is_ok() {
+            crate::ofp_mtk::mtk_shuffle(b"geyixue", &mut mtk_trailer);
+            if check_mtk_patterns(&mtk_trailer) {
+                return Ok(ContainerType::OfpMediaTek);
+            }
+        }
+    }
+
+    // 4. Strict Check for OnePlus OPS Container (Trailer at filesize - 0x200)
+    if file_size > 0x200 {
+        file.seek(SeekFrom::End(-0x200))?;
+        let mut ops_tail = [0u8; 0x200];
+        if file.read_exact(&mut ops_tail).is_ok() {
+            let magic = u32::from_le_bytes(ops_tail[0x1fc..0x200].try_into().unwrap());
+            if magic == 0x9EE3B5D1 || check_ops_manifest(&mut file, file_size, &ops_tail) {
+                return Ok(ContainerType::OnePlusOps);
+            }
+        }
+    }
+
+    // 5. Check for Standard ZIP / OZIP Mode 1 or 2
+    if &head16[0..4] == b"PK\x03\x04" {
+        // Inspect ZIP structure for OZIP markers
+        if is_zip_ozip(&mut file)? {
+            return Ok(ContainerType::Ozip);
+        } else {
+            return Ok(ContainerType::StandardZip);
+        }
+    }
+
+    // 6. Fallback based on file extension
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         let ext_lower = ext.to_lowercase();
         match ext_lower.as_str() {
             "ozip" => return Ok(ContainerType::Ozip),
             "ops" => return Ok(ContainerType::OnePlusOps),
             "ofp" => {
-                // If extension is OFP, return Qualcomm by default as the primary family
                 return Ok(ContainerType::OfpQualcomm);
             }
             "zip" => return Ok(ContainerType::StandardZip),
@@ -138,29 +136,65 @@ fn is_zip_ozip(file: &mut File) -> Result<bool> {
     Ok(false)
 }
 
-fn check_ops_manifest(trailer: &[u8]) -> bool {
-    // Quick heuristic for OPS trailer
+fn check_ops_manifest(file: &mut File, file_size: u64, trailer: &[u8]) -> bool {
+    let xmllength = u32::from_le_bytes(trailer[0x18..0x1C].try_into().unwrap_or_default()) as u64;
+    if xmllength < 100 || xmllength > 10_000_000 {
+        return false;
+    }
+    let xmlpad = if xmllength % 0x200 != 0 {
+        0x200 - (xmllength % 0x200)
+    } else {
+        0
+    };
+    if file_size < 0x200 + xmllength + xmlpad {
+        return false;
+    }
+
     let sbox = hex::decode(crate::ops::SBOX_HEX).unwrap_or_default();
     if sbox.is_empty() {
         return false;
     }
-    // Attempt decrypting the length fields
-    let xmllength = u32::from_le_bytes(trailer[0x14..0x18].try_into().unwrap_or_default()) as u64;
-    xmllength > 100 && xmllength < 10_000_000
+
+    let xml_offset = file_size - 0x200 - (xmllength + xmlpad);
+    if file.seek(SeekFrom::Start(xml_offset)).is_err() {
+        return false;
+    }
+
+    let mut enc16 = [0u8; 16];
+    if file.read_exact(&mut enc16).is_err() {
+        return false;
+    }
+
+    for mbox in &[&crate::ops::MBOX5, &crate::ops::MBOX6, &crate::ops::MBOX4] {
+        let dec = crate::ops::key_custom_decrypt(&enc16, crate::ops::MASTER_KEY, *mbox, &sbox);
+        if dec.windows(4).any(|w| w == b"<?xm" || w == b"xml ") {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn check_mtk_patterns(trailer: &[u8]) -> bool {
-    // MediaTek trailer contains valid u16 partition count and ASCII metadata
     if trailer.len() < 0x6C {
         return false;
     }
-    let count = u16::from_le_bytes(trailer[66..68].try_into().unwrap_or_default());
-    count > 0 && count < 256
+    let count = u16::from_le_bytes(trailer[72..74].try_into().unwrap_or_default());
+    if count == 0 || count > 256 {
+        return false;
+    }
+    let name_bytes = &trailer[0..46];
+    let valid_ascii = name_bytes
+        .iter()
+        .take_while(|&&b| b != 0)
+        .all(|&b| b.is_ascii_graphic() || b == b' ');
+    valid_ascii
 }
 
 pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
     let container_type = detect_container(path)?;
-    let metadata = path.metadata()
+    let metadata = path
+        .metadata()
         .with_context(|| format!("Failed to read metadata for {}", path.display()))?;
     let file_size = metadata.len();
 
