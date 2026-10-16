@@ -40,3 +40,6 @@ jobs:
 
       - name: Run test suite
         run: cargo test --verbose
+
+      - name: Run synthetic parity verification
+        run: python tools/parity.py
