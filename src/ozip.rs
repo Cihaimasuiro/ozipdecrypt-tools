@@ -3,7 +3,7 @@ use aes::cipher::KeyInit;
 use aes::Aes128;
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use zip::write::SimpleFileOptions;
@@ -25,15 +25,28 @@ pub fn read_full<R: Read>(reader: &mut R, mut buf: &mut [u8]) -> io::Result<usiz
 }
 
 pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> Result<()> {
+    if input_path == output_path {
+        bail!(
+            "Input and output paths are identical ({}). Refusing to run to prevent destroying input archive.",
+            input_path.display()
+        );
+    }
+    if let (Ok(in_c), Ok(out_c)) = (input_path.canonicalize(), output_path.canonicalize()) {
+        if in_c == out_c {
+            bail!(
+                "Input and output paths resolve to the same file ({}). Refusing to run to prevent destroying input archive.",
+                input_path.display()
+            );
+        }
+    }
+
     println!("[*] Opening OZIP archive: {}", input_path.display());
     let mut file = File::open(input_path)
         .with_context(|| format!("Unable to open {}", input_path.display()))?;
 
     let mut magic = [0u8; 12];
-    let n = file.read(&mut magic)?;
-    if n < 12 {
-        bail!("Input file is too short to be a valid OZIP archive.");
-    }
+    file.read_exact(&mut magic)
+        .context("Input file is too short to be a valid OZIP archive.")?;
 
     let is_zip = if &magic == OZIP_MAGIC {
         false
@@ -43,7 +56,12 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
         bail!("Unknown magic header in OZIP: expected 'OPPOENCRYPT!' or 'PK'.");
     };
 
-    if !is_zip {
+    let tmp_output = output_path.with_file_name(format!(
+        "{}.part",
+        output_path.file_name().and_then(|s| s.to_str()).unwrap_or("output")
+    ));
+
+    let run_res = if !is_zip {
         // Standalone OZIP mode
         file.seek(SeekFrom::Start(0x1050))?;
         let mut sample_block = [0u8; 16];
@@ -55,8 +73,8 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
         let cipher = Aes128::new_from_slice(&matched_key)
             .map_err(|e| anyhow::anyhow!("Failed to initialize AES cipher: {}", e))?;
 
-        let out_file = File::create(output_path)
-            .with_context(|| format!("Unable to create output file: {}", output_path.display()))?;
+        let out_file = File::create(&tmp_output)
+            .with_context(|| format!("Unable to create temporary file: {}", tmp_output.display()))?;
         let mut wf = BufWriter::new(out_file);
         let mut fr = BufReader::new(file);
 
@@ -84,13 +102,19 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
         }
 
         wf.flush()?;
-        println!("[+] DONE! Successfully decrypted standalone OZIP to {}", output_path.display());
         Ok(())
     } else {
         // Zip container mode
         let mut archive = match ZipArchive::new(BufReader::new(file)) {
             Ok(a) => a,
-            Err(_) => return decrypt_mode2(input_path, output_path, keys),
+            Err(_) => {
+                decrypt_mode2(input_path, &tmp_output, keys)?;
+                if tmp_output.exists() {
+                    fs::rename(&tmp_output, output_path)?;
+                }
+                println!("[+] DONE! Successfully decrypted Mode 2 OZIP to {}", output_path.display());
+                return Ok(());
+            }
         };
 
         let mut clist = HashSet::new();
@@ -114,7 +138,12 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
 
         if !has_oppo_metadata {
             println!("[*] No oppo_metadata detected, attempting Zip Mode 2 (CPH1803/CPH1901)...");
-            return decrypt_mode2(input_path, output_path, keys);
+            decrypt_mode2(input_path, &tmp_output, keys)?;
+            if tmp_output.exists() {
+                fs::rename(&tmp_output, output_path)?;
+            }
+            println!("[+] DONE! Successfully decrypted Mode 2 OZIP to {}", output_path.display());
+            return Ok(());
         }
 
         // Find vbmeta.img for key testing
@@ -135,7 +164,7 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
 
         let key = {
             let mut vbmeta = archive.by_name(&fname)?;
-            io::copy(&mut vbmeta.by_ref().take(0x1050), &mut io::sink())?;
+            io::copy(&mut (&mut vbmeta).take(0x1050), &mut io::sink())?;
             let mut data = [0u8; 16];
             let n = read_full(&mut vbmeta, &mut data)?;
             if n < 16 {
@@ -145,10 +174,15 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
                 .context("Unknown AES key for Zip Mode 1 archive.")?
         };
 
-        let out_file = File::create(output_path)
-            .with_context(|| format!("Unable to create output file: {}", output_path.display()))?;
+        let out_file = File::create(&tmp_output)
+            .with_context(|| format!("Unable to create output file: {}", tmp_output.display()))?;
         let mut writer = ZipWriter::new(BufWriter::new(out_file));
-        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::DEFLATE);
+        let decrypt_options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::DEFLATE)
+            .large_file(true);
+        let pass_options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
 
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i)?;
@@ -156,7 +190,7 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
             println!("[*] Extracting {}", orgfilename);
 
             if entry.is_dir() {
-                writer.add_directory(&orgfilename, options)?;
+                writer.add_directory(&orgfilename, pass_options)?;
                 continue;
             }
 
@@ -164,10 +198,10 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
             if !clist.is_empty() {
                 if clist.contains(&orgfilename) {
                     println!("[+] Decrypting {}", orgfilename);
-                    writer.start_file(&orgfilename, options)?;
+                    writer.start_file(&orgfilename, decrypt_options)?;
                     decrypt_file_v1(&key, None, &mut entry, file_size, &mut writer)?;
                 } else {
-                    writer.start_file(&orgfilename, options)?;
+                    writer.start_file(&orgfilename, pass_options)?;
                     io::copy(&mut entry, &mut writer)?;
                 }
             } else {
@@ -175,10 +209,10 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
                 let n = read_full(&mut entry, &mut magic)?;
                 if n == 12 && &magic == OZIP_MAGIC {
                     println!("[+] Decrypting {}", orgfilename);
-                    writer.start_file(&orgfilename, options)?;
+                    writer.start_file(&orgfilename, decrypt_options)?;
                     decrypt_file_v1(&key, Some(&magic), &mut entry, file_size, &mut writer)?;
                 } else {
-                    writer.start_file(&orgfilename, options)?;
+                    writer.start_file(&orgfilename, pass_options)?;
                     if n > 0 {
                         writer.write_all(&magic[..n])?;
                     }
@@ -188,8 +222,24 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
         }
 
         writer.finish()?;
-        println!("[+] DONE! Successfully decrypted OZIP to {}", output_path.display());
         Ok(())
+    };
+
+    match run_res {
+        Ok(()) => {
+            if tmp_output.exists() {
+                fs::rename(&tmp_output, output_path)
+                    .with_context(|| format!("Failed to move {} to {}", tmp_output.display(), output_path.display()))?;
+            }
+            println!("[+] DONE! Successfully decrypted OZIP to {}", output_path.display());
+            Ok(())
+        }
+        Err(e) => {
+            if tmp_output.exists() {
+                let _ = fs::remove_file(&tmp_output);
+            }
+            Err(e)
+        }
     }
 }
 
@@ -254,7 +304,7 @@ pub fn decrypt_mode2(input_path: &Path, output_path: &Path, keys: &KeyConfig) ->
             let mut magic = [0u8; 12];
             let n = read_full(&mut entry, &mut magic)?;
             if n == 12 && &magic == OZIP_MAGIC {
-                io::copy(&mut entry.by_ref().take(68), &mut io::sink())?;
+                io::copy(&mut (&mut entry).take(68), &mut io::sink())?;
                 let mut data = [0u8; 16];
                 let n = read_full(&mut entry, &mut data)?;
                 if n == 16 {
@@ -274,14 +324,19 @@ pub fn decrypt_mode2(input_path: &Path, output_path: &Path, keys: &KeyConfig) ->
 
     let out_file = File::create(output_path)?;
     let mut writer = ZipWriter::new(BufWriter::new(out_file));
-    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::DEFLATE);
+    let decrypt_options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::DEFLATE)
+        .large_file(true);
+    let pass_options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .large_file(true);
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let orgfilename = entry.name()?.to_string();
 
         if entry.is_dir() {
-            writer.add_directory(&orgfilename, options)?;
+            writer.add_directory(&orgfilename, pass_options)?;
             continue;
         }
 
@@ -289,12 +344,12 @@ pub fn decrypt_mode2(input_path: &Path, output_path: &Path, keys: &KeyConfig) ->
         let n = read_full(&mut entry, &mut magic)?;
         if n == 12 && &magic == OZIP_MAGIC {
             println!("[+] Decrypting {}", orgfilename);
-            writer.start_file(&orgfilename, options)?;
+            writer.start_file(&orgfilename, decrypt_options)?;
             if !decrypt_file_v2(&key, Some(&magic), &mut entry, &mut writer)? {
                 bail!("Failed to decrypt chunk in {}", orgfilename);
             }
         } else {
-            writer.start_file(&orgfilename, options)?;
+            writer.start_file(&orgfilename, pass_options)?;
             if n > 0 {
                 writer.write_all(&magic[..n])?;
             }

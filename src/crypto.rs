@@ -44,11 +44,50 @@ pub const DEFAULT_OZIP_KEYS: &[&str] = &[
     "22A21E821743E5EE33AE81B227B1462E", // F3 Plus CPH1613 MSM8976
 ];
 
+pub const DEFAULT_OFP_KEYSETS: &[(&str, &str, &str, &str)] = &[
+    (
+        "V1.4.17/1.4.27",
+        "27827963787265EF89D126B69A495A21",
+        "82C50203285A2CE7D8C3E198383CE94C",
+        "422DD5399181E223813CD8ECDF2E4D72",
+    ),
+    (
+        "V1.6.17 (Oppo A3s / A7 / R17)",
+        "E11AA7BB558A436A8375FD15DDD4651F",
+        "77DDF6A0696841F6B74782C097835169",
+        "A739742384A44E8BA45207AD5C3700EA",
+    ),
+    (
+        "V1.5.13",
+        "67657963787565E837D226B69A495D21",
+        "F6C50203515A2CE7D8C3E1F938B7E94C",
+        "42F2D5399137E2B2813CD8ECDF2F4D72",
+    ),
+    (
+        "V1.6.6/1.6.9/1.6.17/1.6.24/1.6.26/1.7.6 (R15 Pro/FindX/Reno/K3)",
+        "3C2D518D9BF2E4279DC758CD535147C3",
+        "87C74A29709AC1BF2382276C4E8DF232",
+        "598D92E967265E9BCABE2469FE4A915E",
+    ),
+    (
+        "V1.7.2 (Realme X / Realme 5 / Realme 5 Pro)",
+        "8FB8FB261930260BE945B841AEFA9FD4",
+        "E529E82B28F5A2F8831D860AE39E425D",
+        "8A09DA60ED36F125D64709973372C1CF",
+    ),
+    (
+        "V2.0.3 (OW19W8AP)",
+        "E8AE288C0192C54BF10C5707E9C4705B",
+        "D64FC385DCD52A3C9B5FBA8650F92EDA",
+        "79051FD8D8B6297E2E4559E997F63B7F",
+    ),
+];
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct KeyConfig {
     #[serde(default = "default_ozip_keys")]
     pub ozip_keys: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_ofp_keysets")]
     pub ofp_keysets: Vec<OfpKeyTriplet>,
 }
 
@@ -56,11 +95,23 @@ fn default_ozip_keys() -> Vec<String> {
     DEFAULT_OZIP_KEYS.iter().map(|&s| s.to_string()).collect()
 }
 
+pub fn default_ofp_keysets() -> Vec<OfpKeyTriplet> {
+    DEFAULT_OFP_KEYSETS
+        .iter()
+        .map(|&(name, mc, userkey, ivec)| OfpKeyTriplet {
+            name: name.to_string(),
+            mc: mc.to_string(),
+            userkey: userkey.to_string(),
+            ivec: ivec.to_string(),
+        })
+        .collect()
+}
+
 impl Default for KeyConfig {
     fn default() -> Self {
         Self {
             ozip_keys: default_ozip_keys(),
-            ofp_keysets: Vec::new(),
+            ofp_keysets: default_ofp_keysets(),
         }
     }
 }
@@ -82,6 +133,9 @@ impl KeyConfig {
                 .context("Failed to parse TOML key configuration")?;
             if cfg.ozip_keys.is_empty() {
                 cfg.ozip_keys = default_ozip_keys();
+            }
+            if cfg.ofp_keysets.is_empty() {
+                cfg.ofp_keysets = default_ofp_keysets();
             }
             Ok(cfg)
         } else {
