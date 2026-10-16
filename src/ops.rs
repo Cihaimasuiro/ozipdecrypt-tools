@@ -218,7 +218,12 @@ pub fn key_custom_decrypt_chunk(
     }
 
     if remaining > 0 {
-        rkey = key_update(rkey, mbox, sbox);
+        if ptr == 0 {
+            let sbox_words: Vec<u32> = sbox.iter().map(|&b| b as u32).collect();
+            rkey = key_update(rkey, &sbox_words, sbox);
+        } else {
+            rkey = key_update(rkey, mbox, sbox);
+        }
         let mut j = ptr;
         let mut m = 0;
         while remaining > 0 {

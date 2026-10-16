@@ -745,6 +745,45 @@ mod tests {
             dec, expected_plain,
             "OPS stream decrypt vector mismatch for MBOX5"
         );
+
+        // 7-byte vector (< 16 bytes total) generated with Python opscrypto.py (calls key_update with sbox)
+        let cipher7: Vec<u8> = (0..7).map(|i| ((i * 7 + 13) % 256) as u8).collect();
+        let expected7 = [72u8, 139, 132, 7, 104, 83, 225];
+        let (dec7, _rkey) =
+            ops::key_custom_decrypt_chunk(&cipher7, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        assert_eq!(
+            dec7, expected7,
+            "OPS 7-byte stream decrypt vector mismatch for MBOX5"
+        );
+
+        // 20-byte vector (16-byte block + 4-byte tail) generated with Python opscrypto.py
+        let cipher20: Vec<u8> = (0..20).map(|i| ((i * 7 + 13) % 256) as u8).collect();
+        let expected20 = [
+            59u8, 15, 254, 30, 32, 174, 91, 175, 115, 224, 90, 109, 202, 78, 218, 61, 36, 107, 121,
+            83,
+        ];
+        let (dec20, _rkey) =
+            ops::key_custom_decrypt_chunk(&cipher20, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        assert_eq!(
+            dec20, expected20,
+            "OPS 20-byte stream decrypt tail vector mismatch for MBOX5"
+        );
+
+        // 100-byte vector (6 full 16-byte blocks + 4-byte tail) generated with Python opscrypto.py
+        let cipher100: Vec<u8> = (0..100).map(|i| ((i * 11 + 3) % 256) as u8).collect();
+        let expected100 = hex::decode(
+            "3515fc1826a429c16dca784b2cb428e3e0d5968b672d409577edc87be67a1bb8\
+             0a8df81c970519c94c72c8bdd4e86649f0093a7993e660cec876d3059079cdde\
+             bb5b01ea98ef3f000f7515dfd8a5ff63b63b1e8a6aab2554c707e1dda5b43ae2\
+             53cfc484",
+        )
+        .unwrap();
+        let (dec100, _rkey) =
+            ops::key_custom_decrypt_chunk(&cipher100, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        assert_eq!(
+            dec100, expected100,
+            "OPS 100-byte stream decrypt tail vector mismatch for MBOX5"
+        );
     }
 
     #[test]
