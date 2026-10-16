@@ -460,13 +460,35 @@ fn extract_realme_zip_ofp(ofp_path: &Path, out_dir: &Path, target_partition: Opt
         }
 
         let out_file_path = crate::crypto::safe_join(out_dir, &raw_name)?;
+        if let (Ok(src_c), Ok(dst_c)) = (ofp_path.canonicalize(), out_file_path.canonicalize()) {
+            if src_c == dst_c {
+                bail!("Refusing to overwrite input archive: {}", ofp_path.display());
+            }
+        }
+
         if let Some(parent) = out_file_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
+        let part_path = out_file_path.with_extension(format!(
+            "{}.part",
+            out_file_path.extension().and_then(|s| s.to_str()).unwrap_or("")
+        ));
+
         println!("[*] Extracting \"{}\" to {}...", raw_name, out_file_path.display());
-        let mut out = File::create(&out_file_path)?;
-        std::io::copy(&mut zfile, &mut out)?;
+        let write_res = (|| -> Result<()> {
+            let mut out = File::create(&part_path)?;
+            std::io::copy(&mut zfile, &mut out)?;
+            out.flush()?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_res {
+            let _ = fs::remove_file(&part_path);
+            return Err(e);
+        }
+
+        fs::rename(&part_path, &out_file_path)?;
         count += 1;
     }
 

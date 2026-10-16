@@ -567,6 +567,9 @@ mod tests {
         let base = PathBuf::from("/tmp/extracted");
         assert!(crypto::safe_join(&base, "modem.img").is_ok());
         assert!(crypto::safe_join(&base, "sub/dir/boot.img").is_ok());
+        assert!(crypto::safe_join(&base, "").is_err());
+        assert!(crypto::safe_join(&base, "   ").is_err());
+        assert!(crypto::safe_join(&base, "bad\0file").is_err());
         assert!(crypto::safe_join(&base, "../evil.img").is_err());
         assert!(crypto::safe_join(&base, "..\\evil.img").is_err());
         assert!(crypto::safe_join(&base, "/etc/shadow").is_err());
@@ -619,5 +622,55 @@ mod tests {
         let detected = detect::detect_container(&test_unknown).unwrap();
         let _ = std::fs::remove_file(&test_unknown);
         assert_eq!(detected, detect::ContainerType::Unknown);
+    }
+
+    #[test]
+    fn test_qualcomm_derived_keys_known_answer_vectors() {
+        let expected = [
+            ("d154afeeaafa958f", "2c040f5786829207"),
+            ("2e96d7f462591a0f", "17cc63224c208708"),
+            ("94d62e831cf1a1a0", "7ab5e33bd50d81ca"),
+            ("4a837229e6fc77d4", "00bed47b80eec9d7"),
+            ("3398699acebda0da", "b39a46f5cc4f0d45"),
+            ("b4b7358eea220991", "e9077e26ab102d1b"),
+        ];
+
+        for (idx, (exp_key, exp_iv)) in expected.iter().enumerate() {
+            let triplet = &crypto::default_ofp_keysets()[idx];
+            let (key, iv) = crypto::derive_ofp_qc_key_iv(triplet).unwrap();
+            assert_eq!(std::str::from_utf8(&key).unwrap(), *exp_key, "QC Key #{idx} mismatch");
+            assert_eq!(std::str::from_utf8(&iv).unwrap(), *exp_iv, "QC IV #{idx} mismatch");
+        }
+    }
+
+    #[test]
+    fn test_mtk_derived_keys_known_answer_vectors() {
+        let expected = [
+            ("94d62e831cf1a1a0", "7ab5e33bd50d81ca"),
+            ("52dddab2c46aab56", "35f19b6877f9c360"),
+            ("403200d7e3ccbd16", "e6a12148a4d75e7d"),
+            ("d154afeeaafa958f", "2c040f5786829207"),
+            ("264f527f9ad1ae8c", "788391d4ae2fd10c"),
+            ("443ec2fc7f543de6", "f02df2210580c734"),
+            ("be594eab795ccc85", "2016267766ad552b"),
+            ("1c1ca204c41d4f83", "916e63a107139707"),
+            ("ab3f76d7989207f2", "2bf515b3a9737835"),
+        ];
+
+        for (idx, (exp_key, exp_iv)) in expected.iter().enumerate() {
+            let (key, iv) = ofp_mtk::derive_mtk_key(idx).unwrap();
+            assert_eq!(std::str::from_utf8(&key).unwrap(), *exp_key, "MTK Key #{idx} mismatch");
+            assert_eq!(std::str::from_utf8(&iv).unwrap(), *exp_iv, "MTK IV #{idx} mismatch");
+        }
+    }
+
+    #[test]
+    fn test_ops_stream_decrypt_known_answer_vectors() {
+        let sbox = hex::decode(ops::SBOX_HEX).unwrap();
+        // 16-byte encrypted test vector generated with Python opscrypto.py for plain 0..16 using MBOX5
+        let enc5_first_16 = [54u8, 26, 231, 63, 13, 155, 106, 150, 62, 165, 3, 60, 167, 43, 187, 68];
+        let (dec, _rkey) = ops::key_custom_decrypt_chunk(&enc5_first_16, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        let expected_plain: Vec<u8> = (0u8..16).collect();
+        assert_eq!(dec, expected_plain, "OPS stream decrypt vector mismatch for MBOX5");
     }
 }

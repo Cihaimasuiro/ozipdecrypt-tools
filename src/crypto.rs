@@ -229,6 +229,12 @@ pub fn decrypt_blocks(cipher: &Aes128, buf: &mut [u8]) {
 }
 
 pub fn safe_join(base: &Path, filename: &str) -> Result<PathBuf> {
+    if filename.trim().is_empty() {
+        bail!("Empty filename rejected in archive entry");
+    }
+    if filename.contains('\0') {
+        bail!("NUL byte rejected in archive entry: '{}'", filename);
+    }
     let clean = filename.trim().replace('\\', "/");
     let rel = Path::new(&clean);
     if rel.is_absolute() {
