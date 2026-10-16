@@ -2,8 +2,10 @@
 name = "ozipdecrypt"
 version = "1.3.2"
 edition = "2021"
-authors = ["B. Kerler"]
-description = "Oppo/Oneplus .ozip Firmware decrypter in Rust"
+authors = ["B. Kerler", "Cihaimasuiro"]
+description = "High-performance Oppo / OnePlus / Realme .ozip firmware decrypter in Rust"
+repository = "https://github.com/Cihaimasuiro/ozipdecrypt-tools"
+license = "MIT"
 
 [dependencies]
 aes = "0.9"
