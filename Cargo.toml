@@ -6,6 +6,7 @@ authors = ["Cihaimasuiro <https://github.com/Cihaimasuiro>"]
 description = "Unified high-performance Rust CLI for decrypting Oppo, Realme, and OnePlus firmware (.ozip, .ofp, .ops)"
 license = "MIT"
 repository = "https://github.com/Cihaimasuiro/ozipdecrypt-tools"
+exclude = ["tools/", "tasks/", "source-code/"]
 
 [dependencies]
 anyhow = "1.0"
