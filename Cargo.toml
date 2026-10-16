@@ -1,9 +1,9 @@
 [package]
 name = "ozipdecrypt-tools"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Cihaimasuiro <https://github.com/Cihaimasuiro>"]
-description = "Unified Rust CLI for decrypting .ozip/.ofp firmware archives and automating radio updates"
+description = "Unified high-performance Rust CLI for decrypting Oppo, Realme, and OnePlus firmware (.ozip, .ofp, .ops)"
 license = "MIT"
 repository = "https://github.com/Cihaimasuiro/ozipdecrypt-tools"
 
@@ -19,5 +19,4 @@ hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 quick-xml = { version = "0.36", features = ["serialize"] }
-indicatif = "0.17"
 zip = { version = "9", default-features = false, features = ["deflate"] }

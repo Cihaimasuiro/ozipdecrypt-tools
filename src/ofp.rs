@@ -41,8 +41,8 @@ pub fn extract_ofp_partition(
     // Check if the file is a password-protected ZIP container (Realme OFP variant)
     let mut header2 = [0u8; 2];
     if file.read_exact(&mut header2).is_ok() && &header2 == b"PK" {
-        println!("[!] ZIP container detected in OFP archive.");
-        println!("[*] Realme encrypted ZIP variant uses password: flash@realme$50E7F7D847732396F1582CD62DD385ED7ABB0897");
+        println!("[!] Password-protected ZIP container detected in Realme OFP archive.");
+        return extract_realme_zip_ofp(ofp_path, out_dir, target_partition);
     }
 
     if keys.ofp_keysets.is_empty() {
@@ -432,5 +432,52 @@ fn verify_checksums(file_path: &Path, sha256_sum: &str, md5_sum: &str, is_copy: 
         println!("  [+] {}: Verified checksums successfully.", mode_str);
     }
 
+    Ok(())
+}
+
+fn extract_realme_zip_ofp(ofp_path: &Path, out_dir: &Path, target_partition: Option<&str>) -> Result<()> {
+    let zippw = b"flash@realme$50E7F7D847732396F1582CD62DD385ED7ABB0897";
+    println!("[*] Extracting password-protected Realme OFP archive...");
+    let file = File::open(ofp_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    let mut count = 0;
+
+    for i in 0..archive.len() {
+        let mut zfile = match archive.by_index_decrypt(i, zippw) {
+            Ok(f) => f,
+            Err(e) => bail!("Failed to read/decrypt Realme ZIP entry {}: {}", i, e),
+        };
+        let raw_name = zfile.name()?.to_string();
+        if raw_name.ends_with('/') {
+            continue;
+        }
+
+        if let Some(target) = target_partition {
+            let target_lower = target.to_lowercase();
+            if !raw_name.to_lowercase().contains(&target_lower) {
+                continue;
+            }
+        }
+
+        let out_file_path = crate::crypto::safe_join(out_dir, &raw_name)?;
+        if let Some(parent) = out_file_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        println!("[*] Extracting \"{}\" to {}...", raw_name, out_file_path.display());
+        let mut out = File::create(&out_file_path)?;
+        std::io::copy(&mut zfile, &mut out)?;
+        count += 1;
+    }
+
+    if count == 0 {
+        if let Some(target) = target_partition {
+            bail!("No partition matching '{}' found in Realme ZIP archive.", target);
+        } else {
+            bail!("No files extracted from Realme ZIP archive.");
+        }
+    }
+
+    println!("[+] Successfully extracted {} file(s) from Realme OFP ZIP.", count);
     Ok(())
 }

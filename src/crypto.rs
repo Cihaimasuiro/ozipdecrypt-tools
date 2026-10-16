@@ -236,6 +236,9 @@ pub fn safe_join(base: &Path, filename: &str) -> Result<PathBuf> {
     }
     for comp in rel.components() {
         match comp {
+            Component::Normal(s) if s.to_string_lossy().contains(':') => {
+                bail!("Drive prefix rejected in archive entry: '{}'", filename);
+            }
             Component::Normal(_) => {}
             _ => bail!("Path traversal attempt rejected in archive entry: '{}'", filename),
         }

@@ -523,6 +523,46 @@ mod tests {
     }
 
     #[test]
+    fn test_ops_mbox4_mbox6_known_answer_vectors() {
+        let sbox = hex::decode(ops::SBOX_HEX).unwrap();
+        let key4 = ops::key_update(ops::MASTER_KEY, &ops::MBOX4, &sbox);
+        assert_eq!(
+            key4,
+            [0x925425CC, 0x4490281F, 0xDBB2FE00, 0x8255FC56],
+            "MBOX4 test vector mismatch"
+        );
+
+        let key6 = ops::key_update(ops::MASTER_KEY, &ops::MBOX6, &sbox);
+        assert_eq!(
+            key6,
+            [0x5CED7EB1, 0x63EDDFC3, 0x544A73A7, 0xC8F6D44E],
+            "MBOX6 test vector mismatch"
+        );
+    }
+
+    #[test]
+    fn test_detect_qualcomm_ofp_0x200_regression() {
+        let tmp_dir = std::env::temp_dir();
+        let test_file = tmp_dir.join("test_qc_0x200_regression.bin");
+        let file_size = 0x1000usize;
+        let mut data = vec![0u8; file_size];
+
+        let trailer_pos = file_size - 0x200;
+        data[trailer_pos + 0x10..trailer_pos + 0x14].copy_from_slice(&0x7CEFu32.to_le_bytes());
+        data[trailer_pos + 0x14..trailer_pos + 0x18].copy_from_slice(&500u32.to_le_bytes());
+
+        std::fs::write(&test_file, &data).unwrap();
+
+        let detected = detect::detect_container(&test_file).unwrap();
+        let _ = std::fs::remove_file(&test_file);
+        assert_eq!(
+            detected,
+            detect::ContainerType::OfpQualcomm,
+            "0x200 page size Qualcomm OFP must not be misdetected as OPS"
+        );
+    }
+
+    #[test]
     fn test_safe_join_path_traversal() {
         let base = PathBuf::from("/tmp/extracted");
         assert!(crypto::safe_join(&base, "modem.img").is_ok());
