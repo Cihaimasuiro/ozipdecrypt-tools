@@ -58,7 +58,10 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
 
     let tmp_output = output_path.with_file_name(format!(
         "{}.part",
-        output_path.file_name().and_then(|s| s.to_str()).unwrap_or("output")
+        output_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output")
     ));
 
     let run_res = if !is_zip {
@@ -73,8 +76,9 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
         let cipher = Aes128::new_from_slice(&matched_key)
             .map_err(|e| anyhow::anyhow!("Failed to initialize AES cipher: {}", e))?;
 
-        let out_file = File::create(&tmp_output)
-            .with_context(|| format!("Unable to create temporary file: {}", tmp_output.display()))?;
+        let out_file = File::create(&tmp_output).with_context(|| {
+            format!("Unable to create temporary file: {}", tmp_output.display())
+        })?;
         let mut wf = BufWriter::new(out_file);
         let mut fr = BufReader::new(file);
 
@@ -112,7 +116,10 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
                 if tmp_output.exists() {
                     fs::rename(&tmp_output, output_path)?;
                 }
-                println!("[+] DONE! Successfully decrypted Mode 2 OZIP to {}", output_path.display());
+                println!(
+                    "[+] DONE! Successfully decrypted Mode 2 OZIP to {}",
+                    output_path.display()
+                );
                 return Ok(());
             }
         };
@@ -142,7 +149,10 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
             if tmp_output.exists() {
                 fs::rename(&tmp_output, output_path)?;
             }
-            println!("[+] DONE! Successfully decrypted Mode 2 OZIP to {}", output_path.display());
+            println!(
+                "[+] DONE! Successfully decrypted Mode 2 OZIP to {}",
+                output_path.display()
+            );
             return Ok(());
         }
 
@@ -170,8 +180,7 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
             if n < 16 {
                 bail!("vbmeta.img is too short for AES key verification.");
             }
-            keytest(&data, &keys.ozip_keys)
-                .context("Unknown AES key for Zip Mode 1 archive.")?
+            keytest(&data, &keys.ozip_keys).context("Unknown AES key for Zip Mode 1 archive.")?
         };
 
         let out_file = File::create(&tmp_output)
@@ -228,10 +237,18 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
     match run_res {
         Ok(()) => {
             if tmp_output.exists() {
-                fs::rename(&tmp_output, output_path)
-                    .with_context(|| format!("Failed to move {} to {}", tmp_output.display(), output_path.display()))?;
+                fs::rename(&tmp_output, output_path).with_context(|| {
+                    format!(
+                        "Failed to move {} to {}",
+                        tmp_output.display(),
+                        output_path.display()
+                    )
+                })?;
             }
-            println!("[+] DONE! Successfully decrypted OZIP to {}", output_path.display());
+            println!(
+                "[+] DONE! Successfully decrypted OZIP to {}",
+                output_path.display()
+            );
             Ok(())
         }
         Err(e) => {
@@ -292,7 +309,10 @@ pub fn decrypt_file_v1<R: Read, W: Write>(
 }
 
 pub fn decrypt_mode2(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> Result<()> {
-    println!("[*] Finding key for Mode 2 archive: {}", input_path.display());
+    println!(
+        "[*] Finding key for Mode 2 archive: {}",
+        input_path.display()
+    );
     let file = File::open(input_path)?;
     let mut archive = ZipArchive::new(BufReader::new(file))?;
 
@@ -358,7 +378,10 @@ pub fn decrypt_mode2(input_path: &Path, output_path: &Path, keys: &KeyConfig) ->
     }
 
     writer.finish()?;
-    println!("[+] DONE! Successfully decrypted Mode 2 OZIP to {}", output_path.display());
+    println!(
+        "[+] DONE! Successfully decrypted Mode 2 OZIP to {}",
+        output_path.display()
+    );
     Ok(())
 }
 

@@ -108,7 +108,13 @@ fn main() -> Result<()> {
             }),
             _,
         ) => {
-            handle_extract(&input, out_dir.as_deref(), partition.as_deref(), sideload, &key_config)?;
+            handle_extract(
+                &input,
+                out_dir.as_deref(),
+                partition.as_deref(),
+                sideload,
+                &key_config,
+            )?;
         }
         (Some(Commands::Info { input }), _) => {
             handle_info(&input)?;
@@ -122,10 +128,17 @@ fn main() -> Result<()> {
             _,
         ) => {
             let out_path = output.unwrap_or_else(|| {
-                if input.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false) {
+                if input
+                    .extension()
+                    .map(|e| e.eq_ignore_ascii_case("zip"))
+                    .unwrap_or(false)
+                {
                     input.with_file_name(format!(
                         "{}.decrypted.zip",
-                        input.file_stem().and_then(|s| s.to_str()).unwrap_or("firmware")
+                        input
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("firmware")
                     ))
                 } else {
                     input.with_extension("zip")
@@ -149,16 +162,26 @@ fn main() -> Result<()> {
                 ofp_mtk::extract_ofp_mtk(&input, &out_dir, partition.as_deref())?;
             } else {
                 // Try Qualcomm first; if it fails with invalid magic/trailer, fallback to MediaTek
-                match ofp::extract_ofp_partition(&input, &out_dir, partition.as_deref(), &key_config) {
+                match ofp::extract_ofp_partition(
+                    &input,
+                    &out_dir,
+                    partition.as_deref(),
+                    &key_config,
+                ) {
                     Ok(()) => {}
                     Err(qc_err) => {
-                        println!("[*] Qualcomm OFP detection did not match, trying MediaTek OFP...");
-                        if let Err(mtk_err) = ofp_mtk::extract_ofp_mtk(&input, &out_dir, partition.as_deref()) {
+                        println!(
+                            "[*] Qualcomm OFP detection did not match, trying MediaTek OFP..."
+                        );
+                        if let Err(mtk_err) =
+                            ofp_mtk::extract_ofp_mtk(&input, &out_dir, partition.as_deref())
+                        {
                             bail!(
                                 "Failed to extract OFP archive as Qualcomm or MediaTek:\n\
                                  - Qualcomm check: {}\n\
                                  - MediaTek check: {}",
-                                qc_err, mtk_err
+                                qc_err,
+                                mtk_err
                             );
                         }
                     }
@@ -207,11 +230,24 @@ fn handle_extract(
     match container_type {
         detect::ContainerType::Ozip => {
             let out_path = if let Some(dir) = out_dir {
-                dir.join(format!("{}.zip", input.file_stem().and_then(|s| s.to_str()).unwrap_or("firmware")))
-            } else if input.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false) {
+                dir.join(format!(
+                    "{}.zip",
+                    input
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("firmware")
+                ))
+            } else if input
+                .extension()
+                .map(|e| e.eq_ignore_ascii_case("zip"))
+                .unwrap_or(false)
+            {
                 input.with_file_name(format!(
                     "{}.decrypted.zip",
-                    input.file_stem().and_then(|s| s.to_str()).unwrap_or("firmware")
+                    input
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("firmware")
                 ))
             } else {
                 input.with_extension("zip")
@@ -227,13 +263,16 @@ fn handle_extract(
             match ofp::extract_ofp_partition(input, target_dir, partition, key_config) {
                 Ok(()) => {}
                 Err(qc_err) => {
-                    println!("[*] Qualcomm OFP extraction did not match, falling back to MediaTek...");
+                    println!(
+                        "[*] Qualcomm OFP extraction did not match, falling back to MediaTek..."
+                    );
                     if let Err(mtk_err) = ofp_mtk::extract_ofp_mtk(input, target_dir, partition) {
                         bail!(
                             "Failed to extract OFP archive as Qualcomm or MediaTek:\n\
                              - Qualcomm: {}\n\
                              - MediaTek: {}",
-                            qc_err, mtk_err
+                            qc_err,
+                            mtk_err
                         );
                     }
                 }
@@ -272,7 +311,11 @@ fn handle_info(input: &Path) -> Result<()> {
     let info = detect::describe_container(input)?;
     println!("\n=== Firmware Container Diagnostic ===");
     println!("File:         {}", input.display());
-    println!("Size:         {:.2} MB ({} bytes)", info.file_size as f64 / (1024.0 * 1024.0), info.file_size);
+    println!(
+        "Size:         {:.2} MB ({} bytes)",
+        info.file_size as f64 / (1024.0 * 1024.0),
+        info.file_size
+    );
     println!("Format:       {}", info.container_type);
     println!("Description:  {}", info.details);
     println!("=====================================\n");
@@ -347,7 +390,14 @@ mod tests {
 
         let mut reader = Cursor::new(&enc);
         let mut decrypted = Vec::new();
-        ozip::decrypt_file_v1(&key_bytes, None, &mut reader, enc.len() as u64, &mut decrypted).unwrap();
+        ozip::decrypt_file_v1(
+            &key_bytes,
+            None,
+            &mut reader,
+            enc.len() as u64,
+            &mut decrypted,
+        )
+        .unwrap();
 
         assert_eq!(decrypted, original_data);
     }
@@ -435,7 +485,8 @@ mod tests {
                     enc.extend_from_slice(&block[..sub_remain.len()]);
                     sub_offset += sub_remain.len();
                 } else {
-                    let mut block = cipher::generic_array::GenericArray::clone_from_slice(&sub_remain[..16]);
+                    let mut block =
+                        cipher::generic_array::GenericArray::clone_from_slice(&sub_remain[..16]);
                     cipher.encrypt_block(&mut block);
                     enc.extend_from_slice(&block);
                     sub_offset += 16;
@@ -638,8 +689,16 @@ mod tests {
         for (idx, (exp_key, exp_iv)) in expected.iter().enumerate() {
             let triplet = &crypto::default_ofp_keysets()[idx];
             let (key, iv) = crypto::derive_ofp_qc_key_iv(triplet).unwrap();
-            assert_eq!(std::str::from_utf8(&key).unwrap(), *exp_key, "QC Key #{idx} mismatch");
-            assert_eq!(std::str::from_utf8(&iv).unwrap(), *exp_iv, "QC IV #{idx} mismatch");
+            assert_eq!(
+                std::str::from_utf8(&key).unwrap(),
+                *exp_key,
+                "QC Key #{idx} mismatch"
+            );
+            assert_eq!(
+                std::str::from_utf8(&iv).unwrap(),
+                *exp_iv,
+                "QC IV #{idx} mismatch"
+            );
         }
     }
 
@@ -659,8 +718,16 @@ mod tests {
 
         for (idx, (exp_key, exp_iv)) in expected.iter().enumerate() {
             let (key, iv) = ofp_mtk::derive_mtk_key(idx).unwrap();
-            assert_eq!(std::str::from_utf8(&key).unwrap(), *exp_key, "MTK Key #{idx} mismatch");
-            assert_eq!(std::str::from_utf8(&iv).unwrap(), *exp_iv, "MTK IV #{idx} mismatch");
+            assert_eq!(
+                std::str::from_utf8(&key).unwrap(),
+                *exp_key,
+                "MTK Key #{idx} mismatch"
+            );
+            assert_eq!(
+                std::str::from_utf8(&iv).unwrap(),
+                *exp_iv,
+                "MTK IV #{idx} mismatch"
+            );
         }
     }
 
@@ -668,9 +735,100 @@ mod tests {
     fn test_ops_stream_decrypt_known_answer_vectors() {
         let sbox = hex::decode(ops::SBOX_HEX).unwrap();
         // 16-byte encrypted test vector generated with Python opscrypto.py for plain 0..16 using MBOX5
-        let enc5_first_16 = [54u8, 26, 231, 63, 13, 155, 106, 150, 62, 165, 3, 60, 167, 43, 187, 68];
-        let (dec, _rkey) = ops::key_custom_decrypt_chunk(&enc5_first_16, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        let enc5_first_16 = [
+            54u8, 26, 231, 63, 13, 155, 106, 150, 62, 165, 3, 60, 167, 43, 187, 68,
+        ];
+        let (dec, _rkey) =
+            ops::key_custom_decrypt_chunk(&enc5_first_16, ops::MASTER_KEY, &ops::MBOX5, &sbox);
         let expected_plain: Vec<u8> = (0u8..16).collect();
-        assert_eq!(dec, expected_plain, "OPS stream decrypt vector mismatch for MBOX5");
+        assert_eq!(
+            dec, expected_plain,
+            "OPS stream decrypt vector mismatch for MBOX5"
+        );
+    }
+
+    #[test]
+    fn test_detect_qualcomm_ofp_0x1000_page_size() {
+        let tmp_dir = std::env::temp_dir();
+        let test_file = tmp_dir.join("test_qc_0x1000.bin");
+        let file_size = 0x2000usize;
+        let mut data = vec![0u8; file_size];
+        let trailer_pos = file_size - 0x1000;
+        data[trailer_pos + 0x10..trailer_pos + 0x14].copy_from_slice(&0x7CEFu32.to_le_bytes());
+        std::fs::write(&test_file, &data).unwrap();
+
+        let detected = detect::detect_container(&test_file).unwrap();
+        let _ = std::fs::remove_file(&test_file);
+        assert_eq!(detected, detect::ContainerType::OfpQualcomm);
+    }
+
+    #[test]
+    fn test_detect_mtk_with_non_zero_count() {
+        let tmp_dir = std::env::temp_dir();
+        let test_file = tmp_dir.join("test_mtk_detect.bin");
+        let file_size = 0x1000usize;
+        let mut data = vec![0u8; file_size];
+        let trailer_pos = file_size - 0x6C;
+        let key = b"geyixue";
+        for i in 0..0x6C {
+            let k = key[i % key.len()];
+            let target_byte = if i == 72 { 10u8 } else { 0u8 };
+            let val = target_byte ^ k;
+            data[trailer_pos + i] = ((val & 0xF) << 4) | ((val & 0xF0) >> 4);
+        }
+        std::fs::write(&test_file, &data).unwrap();
+
+        let detected = detect::detect_container(&test_file).unwrap();
+        let _ = std::fs::remove_file(&test_file);
+        assert_eq!(detected, detect::ContainerType::OfpMediaTek);
+    }
+
+    #[test]
+    fn test_detect_ops_trailer_magic() {
+        let tmp_dir = std::env::temp_dir();
+        let test_file = tmp_dir.join("test_ops_detect.bin");
+        let file_size = 0x1000usize;
+        let mut data = vec![0u8; file_size];
+        data[file_size - 4..file_size].copy_from_slice(&0x9EE3B5D1u32.to_le_bytes());
+        std::fs::write(&test_file, &data).unwrap();
+
+        let detected = detect::detect_container(&test_file).unwrap();
+        let _ = std::fs::remove_file(&test_file);
+        assert_eq!(detected, detect::ContainerType::OnePlusOps);
+    }
+
+    #[test]
+    fn test_detect_ofp_extension_fallback() {
+        let tmp_dir = std::env::temp_dir();
+        let test_file = tmp_dir.join("fallback_device.ofp");
+        let data = vec![0x55u8; 512];
+        std::fs::write(&test_file, &data).unwrap();
+
+        let detected = detect::detect_container(&test_file).unwrap();
+        let _ = std::fs::remove_file(&test_file);
+        assert_eq!(detected, detect::ContainerType::OfpQualcomm);
+    }
+
+    #[test]
+    fn test_truncated_corrupt_files_return_err() {
+        let tmp_dir = std::env::temp_dir();
+        let corrupt_file = tmp_dir.join("test_corrupt.bin");
+        std::fs::write(&corrupt_file, b"TOO_SHORT").unwrap();
+
+        let keys = crypto::KeyConfig::default();
+        let out_dir = tmp_dir.join("out_corrupt");
+
+        // OZIP on truncated file should return Err without panic
+        assert!(
+            ozip::decrypt_ozip(&corrupt_file, &corrupt_file.with_extension("zip"), &keys).is_err()
+        );
+
+        // OFP extraction on truncated/corrupt file should return Err without panic
+        assert!(ofp::extract_ofp_partition(&corrupt_file, &out_dir, None, &keys).is_err());
+
+        // OPS extraction on truncated/corrupt file should return Err without panic
+        assert!(ops::extract_ops(&corrupt_file, &out_dir, None).is_err());
+
+        let _ = std::fs::remove_file(&corrupt_file);
     }
 }

@@ -136,9 +136,10 @@ fn is_zip_ozip(file: &mut File) -> Result<bool> {
     Ok(false)
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn check_ops_manifest(file: &mut File, file_size: u64, trailer: &[u8]) -> bool {
     let xmllength = u32::from_le_bytes(trailer[0x18..0x1C].try_into().unwrap_or_default()) as u64;
-    if xmllength < 100 || xmllength > 10_000_000 {
+    if !(100..=10_000_000).contains(&xmllength) {
         return false;
     }
     let xmlpad = if xmllength % 0x200 != 0 {

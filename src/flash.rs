@@ -11,10 +11,9 @@ struct AdbDevice {
 
 pub fn adb_sideload(zip_path: &Path) -> Result<()> {
     println!("[*] Checking for connected Android devices via ADB...");
-    let devices_output = Command::new("adb")
-        .arg("devices")
-        .output()
-        .context("Failed to execute 'adb'. Ensure Android SDK Platform-Tools is installed and in your PATH.")?;
+    let devices_output = Command::new("adb").arg("devices").output().context(
+        "Failed to execute 'adb'. Ensure Android SDK Platform-Tools is installed and in your PATH.",
+    )?;
 
     let stdout = String::from_utf8_lossy(&devices_output.stdout);
     let mut devices = Vec::new();
@@ -57,11 +56,20 @@ pub fn adb_sideload(zip_path: &Path) -> Result<()> {
 
     // Find device in sideload mode
     let target_device = if let Some(sideload_dev) = devices.iter().find(|d| d.state == "sideload") {
-        println!("[+] Found device {} in 'sideload' mode.", sideload_dev.serial);
+        println!(
+            "[+] Found device {} in 'sideload' mode.",
+            sideload_dev.serial
+        );
         sideload_dev.serial.clone()
     } else if let Some(os_dev) = devices.iter().find(|d| d.state == "device") {
-        println!("[!] Device {} is running in standard Android OS mode.", os_dev.serial);
-        print!("[?] Would you like to reboot {} into Recovery mode now? [y/N]: ", os_dev.serial);
+        println!(
+            "[!] Device {} is running in standard Android OS mode.",
+            os_dev.serial
+        );
+        print!(
+            "[?] Would you like to reboot {} into Recovery mode now? [y/N]: ",
+            os_dev.serial
+        );
         io::stdout().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
@@ -89,7 +97,11 @@ pub fn adb_sideload(zip_path: &Path) -> Result<()> {
         );
     };
 
-    println!("[*] Starting ADB sideload of {} to {}...", zip_path.display(), target_device);
+    println!(
+        "[*] Starting ADB sideload of {} to {}...",
+        zip_path.display(),
+        target_device
+    );
     let status = Command::new("adb")
         .arg("-s")
         .arg(&target_device)

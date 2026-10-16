@@ -127,10 +127,11 @@ pub struct OfpKeyTriplet {
 impl KeyConfig {
     pub fn load_or_default(path: &Path) -> Result<Self> {
         if path.exists() {
-            let raw = fs::read_to_string(path)
-                .with_context(|| format!("Failed to read key configuration from {}", path.display()))?;
-            let mut cfg: KeyConfig = toml::from_str(&raw)
-                .context("Failed to parse TOML key configuration")?;
+            let raw = fs::read_to_string(path).with_context(|| {
+                format!("Failed to read key configuration from {}", path.display())
+            })?;
+            let mut cfg: KeyConfig =
+                toml::from_str(&raw).context("Failed to parse TOML key configuration")?;
             if cfg.ozip_keys.is_empty() {
                 cfg.ozip_keys = default_ozip_keys();
             }
@@ -220,6 +221,7 @@ pub fn decrypt_block(cipher: &Aes128, buf: &mut [u8; 16]) {
     buf.copy_from_slice(&block);
 }
 
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn decrypt_blocks(cipher: &Aes128, buf: &mut [u8]) {
     for chunk in buf.chunks_exact_mut(16) {
         let mut block = cipher::generic_array::GenericArray::clone_from_slice(chunk);
@@ -246,7 +248,10 @@ pub fn safe_join(base: &Path, filename: &str) -> Result<PathBuf> {
                 bail!("Drive prefix rejected in archive entry: '{}'", filename);
             }
             Component::Normal(_) => {}
-            _ => bail!("Path traversal attempt rejected in archive entry: '{}'", filename),
+            _ => bail!(
+                "Path traversal attempt rejected in archive entry: '{}'",
+                filename
+            ),
         }
     }
     Ok(base.join(rel))

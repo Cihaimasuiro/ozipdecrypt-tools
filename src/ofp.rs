@@ -50,11 +50,18 @@ pub fn extract_ofp_partition(
     }
 
     let page_size = detect_page_size(&mut file, file_size)?;
-    println!("[+] Detected OFP page size: {:#x} ({} bytes)", page_size, page_size);
+    println!(
+        "[+] Detected OFP page size: {:#x} ({} bytes)",
+        page_size, page_size
+    );
 
     // Locate and decrypt XML manifest using key triplets
-    let (matched_triplet, key, iv, xml_data) = find_and_decrypt_xml(&mut file, file_size, page_size, keys)?;
-    println!("[+] Successfully matched OFP keyset: {}", matched_triplet.name);
+    let (matched_triplet, key, iv, xml_data) =
+        find_and_decrypt_xml(&mut file, file_size, page_size, keys)?;
+    println!(
+        "[+] Successfully matched OFP keyset: {}",
+        matched_triplet.name
+    );
 
     let xml_str = match String::from_utf8(xml_data.clone()) {
         Ok(s) => s,
@@ -69,7 +76,10 @@ pub fn extract_ofp_partition(
 
     // Parse items from ProFile.xml
     let items = parse_profile_xml(&xml_str, page_size)?;
-    println!("[+] Discovered {} partition/file items in ProFile.xml", items.len());
+    println!(
+        "[+] Discovered {} partition/file items in ProFile.xml",
+        items.len()
+    );
 
     let mut extracted_count = 0;
     for item in items {
@@ -87,7 +97,10 @@ pub fn extract_ofp_partition(
 
     if extracted_count == 0 {
         if let Some(target) = target_partition {
-            bail!("No partition matching '{}' was found in ProFile.xml", target);
+            bail!(
+                "No partition matching '{}' was found in ProFile.xml",
+                target
+            );
         } else {
             bail!("No extractable partitions found in ProFile.xml");
         }
@@ -116,6 +129,7 @@ fn detect_page_size(file: &mut File, file_size: u64) -> Result<u64> {
     Ok(0x200)
 }
 
+#[allow(clippy::type_complexity)]
 fn find_and_decrypt_xml(
     file: &mut File,
     file_size: u64,
@@ -133,7 +147,9 @@ fn find_and_decrypt_xml(
 
     if length < 200 {
         // A57 length calculation hack from ofp_qc_decrypt.py
-        length = xml_trailer_offset.saturating_sub(data_offset).saturating_sub(0x57);
+        length = xml_trailer_offset
+            .saturating_sub(data_offset)
+            .saturating_sub(0x57);
     }
 
     if data_offset + length > file_size {
@@ -270,7 +286,15 @@ fn parse_element_item(
     let is_copy_only = copy_only_tags.contains(&parent_tag);
 
     let mut effective_length = length;
-    if ["Config", "Provision", "ChainedTableOfDigests", "DigestsToSign", "Firmware"].contains(&parent_tag) {
+    if [
+        "Config",
+        "Provision",
+        "ChainedTableOfDigests",
+        "DigestsToSign",
+        "Firmware",
+    ]
+    .contains(&parent_tag)
+    {
         effective_length = rlength;
     }
 
@@ -301,6 +325,7 @@ fn copy_stream<R: Read, W: Write>(reader: &mut R, writer: &mut W, mut length: u6
     Ok(())
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn extract_single_item(
     src_file: &mut File,
     item: &OfpPartitionItem,
@@ -364,7 +389,12 @@ fn extract_single_item(
     Ok(())
 }
 
-fn verify_checksums(file_path: &Path, sha256_sum: &str, md5_sum: &str, is_copy: bool) -> Result<()> {
+fn verify_checksums(
+    file_path: &Path,
+    sha256_sum: &str,
+    md5_sum: &str,
+    is_copy: bool,
+) -> Result<()> {
     let mode_str = if is_copy { "Copy" } else { "Decrypt" };
     let mut f = File::open(file_path)?;
     let metadata_len = f.metadata()?.len();
@@ -422,11 +452,12 @@ fn verify_checksums(file_path: &Path, sha256_sum: &str, md5_sum: &str, is_copy: 
         }
     }
 
-
     if !md5_verified || !sha256_verified {
         bail!(
             "{}: Checksum verification failed! (md5_ok: {}, sha256_ok: {})",
-            mode_str, md5_verified, sha256_verified
+            mode_str,
+            md5_verified,
+            sha256_verified
         );
     } else {
         println!("  [+] {}: Verified checksums successfully.", mode_str);
@@ -435,7 +466,11 @@ fn verify_checksums(file_path: &Path, sha256_sum: &str, md5_sum: &str, is_copy: 
     Ok(())
 }
 
-fn extract_realme_zip_ofp(ofp_path: &Path, out_dir: &Path, target_partition: Option<&str>) -> Result<()> {
+fn extract_realme_zip_ofp(
+    ofp_path: &Path,
+    out_dir: &Path,
+    target_partition: Option<&str>,
+) -> Result<()> {
     let zippw = b"flash@realme$50E7F7D847732396F1582CD62DD385ED7ABB0897";
     println!("[*] Extracting password-protected Realme OFP archive...");
     let file = File::open(ofp_path)?;
@@ -462,7 +497,10 @@ fn extract_realme_zip_ofp(ofp_path: &Path, out_dir: &Path, target_partition: Opt
         let out_file_path = crate::crypto::safe_join(out_dir, &raw_name)?;
         if let (Ok(src_c), Ok(dst_c)) = (ofp_path.canonicalize(), out_file_path.canonicalize()) {
             if src_c == dst_c {
-                bail!("Refusing to overwrite input archive: {}", ofp_path.display());
+                bail!(
+                    "Refusing to overwrite input archive: {}",
+                    ofp_path.display()
+                );
             }
         }
 
@@ -472,10 +510,17 @@ fn extract_realme_zip_ofp(ofp_path: &Path, out_dir: &Path, target_partition: Opt
 
         let part_path = out_file_path.with_extension(format!(
             "{}.part",
-            out_file_path.extension().and_then(|s| s.to_str()).unwrap_or("")
+            out_file_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
         ));
 
-        println!("[*] Extracting \"{}\" to {}...", raw_name, out_file_path.display());
+        println!(
+            "[*] Extracting \"{}\" to {}...",
+            raw_name,
+            out_file_path.display()
+        );
         let write_res = (|| -> Result<()> {
             let mut out = File::create(&part_path)?;
             std::io::copy(&mut zfile, &mut out)?;
@@ -494,12 +539,18 @@ fn extract_realme_zip_ofp(ofp_path: &Path, out_dir: &Path, target_partition: Opt
 
     if count == 0 {
         if let Some(target) = target_partition {
-            bail!("No partition matching '{}' found in Realme ZIP archive.", target);
+            bail!(
+                "No partition matching '{}' found in Realme ZIP archive.",
+                target
+            );
         } else {
             bail!("No files extracted from Realme ZIP archive.");
         }
     }
 
-    println!("[+] Successfully extracted {} file(s) from Realme OFP ZIP.", count);
+    println!(
+        "[+] Successfully extracted {} file(s) from Realme OFP ZIP.",
+        count
+    );
     Ok(())
 }

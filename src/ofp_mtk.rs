@@ -53,10 +53,7 @@ pub const MTK_KEYTABLES: &[&[&str]] = &[
         "12698965A132C76136CC88C5DD94EE91",
     ],
     // Direct AES key & IV
-    &[
-        "ab3f76d7989207f2",
-        "2bf515b3a9737835",
-    ],
+    &["ab3f76d7989207f2", "2bf515b3a9737835"],
 ];
 
 /// Deobfuscates bytes by XORing with key[i % keylen] and swapping nibbles
@@ -144,12 +141,16 @@ pub fn extract_ofp_mtk(
     target_partition: Option<&str>,
 ) -> Result<()> {
     fs::create_dir_all(out_dir)?;
-    let mut file = File::open(ofp_path)
-        .with_context(|| format!("Failed to open MediaTek OFP archive: {}", ofp_path.display()))?;
+    let mut file = File::open(ofp_path).with_context(|| {
+        format!(
+            "Failed to open MediaTek OFP archive: {}",
+            ofp_path.display()
+        )
+    })?;
     let file_size = file.metadata()?.len();
 
-    let (aes_key, aes_iv) = brute_mtk_key(&mut file)
-        .context("Failed to detect MediaTek OFP AES key.")?;
+    let (aes_key, aes_iv) =
+        brute_mtk_key(&mut file).context("Failed to detect MediaTek OFP AES key.")?;
     println!("[+] Matched MediaTek OFP AES key.");
 
     let hdr_key = b"geyixue";
@@ -243,7 +244,10 @@ pub fn extract_ofp_mtk(
         }
     }
 
-    println!("[+] Found {} partitions in MediaTek OFP archive.", entries.len());
+    println!(
+        "[+] Found {} partitions in MediaTek OFP archive.",
+        entries.len()
+    );
 
     let mut extracted_count = 0;
     for entry in &entries {

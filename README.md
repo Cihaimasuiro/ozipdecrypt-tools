@@ -11,10 +11,10 @@ Unified high-performance Rust CLI for decrypting Oppo, OnePlus, and Realme firmw
   - **Standalone Mode**: Single `.ozip` files starting with `OPPOENCRYPT!`.
   - **Zip Mode 1**: Standard OTA packages with `oppo_metadata` and `vbmeta.img`.
   - **Zip Mode 2**: Interleaved chunk encryption used by Snapdragon 450 devices (e.g., Oppo A3s `CPH1803`, Oppo A7 `CPH1901`, Oppo A5s `CPH1909`).
-- **Qualcomm & MediaTek OFP Unpackers**: Decrypts and unpacks Qualcomm Snapdragon and MediaTek Helio/Dimensity `.ofp` stock firmware containers with selective partition extraction (such as `modem` / `NON-HLOS.bin` for Wi-Fi/radio repairs).
-- **OnePlus OPS Unpacker**: Decrypts and extracts partitions from OnePlus `.ops` unbrick containers using the custom CFB-128 cipher engine, 256-byte S-Box expansion schedule, and XML metadata manifest parser.
+- **Qualcomm & MediaTek OFP Unpackers**: Decrypts and unpacks Qualcomm Snapdragon and MediaTek Helio/Dimensity `.ofp` stock firmware containers with selective partition extraction (such as `modem` / `NON-HLOS.bin` for Wi-Fi/radio repairs). Supports password-protected Realme encrypted ZIP OFP containers.
+- **OnePlus OPS Unpacker**: Decrypts and extracts partitions from OnePlus `.ops` unbrick containers using the custom CFB-128 cipher engine, 2048-byte S-Box table, MBOX vectors, and XML metadata manifest parser.
 - **One-Command Sideload**: Automatically invokes `adb sideload` once decryption finishes.
-- **Built-in Key Database**: 35 preconfigured AES-128 keys matched automatically against Android / ZIP header magics (`PK\x03\x04`, `AVB0`, and `ANDR`). Custom keys can also be supplied via `keys.toml`.
+- **Built-in Key Database & Constants Audit**: 35 preconfigured AES-128 keys matched automatically against Android / ZIP header magics (`PK\x03\x04`, `AVB0`, and `ANDR`), 6 Qualcomm OFP keysets, and 9 MediaTek keytables, verified 100% bit-for-bit against upstream Python tools (`python tools/check_constants.py`). Custom keys can also be supplied via `keys.toml`.
 
 ---
 
@@ -121,10 +121,14 @@ ivec = "00000000000000000000000000000000"
 
 ---
 
-## Automated Tests
+## Automated Tests & Verification
 
-Run the built-in test suite covering bitwise operations, key derivation, and multi-format chunk decryption:
+Run the automated constants audit diffing against upstream Python modules:
+```bash
+python tools/check_constants.py
+```
 
+Run the built-in test suite (25 unit tests) covering bitwise operations, key derivation, streaming decryption, auto-detection, and robustness:
 ```bash
 cargo test
 ```
