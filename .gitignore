@@ -1,5 +1,6 @@
 /target/
 /source-code/
+/tasks/
 .idea/
 __pycache__/
 AGENTS.md
