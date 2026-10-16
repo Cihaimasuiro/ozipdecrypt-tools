@@ -1,9 +1,10 @@
 mod crypto;
 mod flash;
 mod ofp;
+mod ofp_mtk;
 mod ozip;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use crypto::KeyConfig;
 use std::path::PathBuf;
@@ -40,7 +41,7 @@ enum Commands {
         #[arg(long)]
         sideload: bool,
     },
-    /// Decrypt and unpack a Qualcomm .ofp stock firmware archive
+    /// Decrypt and unpack a Qualcomm or MediaTek .ofp stock firmware archive
     Ofp {
         /// Input .ofp firmware file
         input: PathBuf,
@@ -50,6 +51,9 @@ enum Commands {
         /// Optional single partition to extract (e.g., "modem" for NON-HLOS.bin Wi-Fi/radio fix)
         #[arg(short, long)]
         partition: Option<String>,
+        /// Explicitly select MediaTek mode (auto-detected by default)
+        #[arg(long)]
+        mtk: bool,
     },
     /// Directly sideload a decrypted .zip firmware package to an attached device
     Sideload {
@@ -91,10 +95,29 @@ fn main() -> Result<()> {
                 input,
                 out_dir,
                 partition,
+                mtk,
             }),
             _,
         ) => {
-            ofp::extract_ofp_partition(&input, &out_dir, partition.as_deref(), &key_config)?;
+            if mtk {
+                ofp_mtk::extract_ofp_mtk(&input, &out_dir, partition.as_deref())?;
+            } else {
+                // Try Qualcomm first; if it fails with invalid magic/trailer, fallback to MediaTek
+                match ofp::extract_ofp_partition(&input, &out_dir, partition.as_deref(), &key_config) {
+                    Ok(()) => {}
+                    Err(qc_err) => {
+                        println!("[*] Qualcomm OFP detection did not match, trying MediaTek OFP...");
+                        if let Err(mtk_err) = ofp_mtk::extract_ofp_mtk(&input, &out_dir, partition.as_deref()) {
+                            bail!(
+                                "Failed to extract OFP archive as Qualcomm or MediaTek:\n\
+                                 - Qualcomm check: {}\n\
+                                 - MediaTek check: {}",
+                                qc_err, mtk_err
+                            );
+                        }
+                    }
+                }
+            }
         }
         (Some(Commands::Sideload { zip_file }), _) => {
             flash::adb_sideload(&zip_file)?;
@@ -329,5 +352,28 @@ mod tests {
         assert!(res.is_err());
         let err_msg = res.err().unwrap().to_string();
         assert!(err_msg.contains("identical"));
+    }
+
+    #[test]
+    fn test_mtk_shuffle_primitives() {
+        let key = b"geyixue";
+        let mut data = [0x12, 0x34, 0x56, 0x78];
+        ofp_mtk::mtk_shuffle(key, &mut data);
+        assert_ne!(data, [0x12, 0x34, 0x56, 0x78]);
+
+        let mut data2 = [0xAB, 0xCD, 0xEF, 0x01];
+        ofp_mtk::mtk_shuffle2(key, &mut data2);
+        assert_ne!(data2, [0xAB, 0xCD, 0xEF, 0x01]);
+    }
+
+    #[test]
+    fn test_mtk_key_derivation() {
+        for idx in 0..ofp_mtk::MTK_KEYTABLES.len() {
+            let res = ofp_mtk::derive_mtk_key(idx);
+            assert!(res.is_ok());
+            let (key, iv) = res.unwrap();
+            assert_eq!(key.len(), 16);
+            assert_eq!(iv.len(), 16);
+        }
     }
 }

@@ -50,14 +50,19 @@ ozipdecrypt-tools ozip CPH1901_OTA.ozip -o update.zip
 ozipdecrypt-tools ozip CPH1901_OTA.ozip --sideload
 ```
 
-### 2. Extract Qualcomm `.ofp` Stock Firmware
+### 2. Extract Qualcomm & MediaTek `.ofp` Stock Firmware
+
+`ozipdecrypt-tools` automatically detects whether the `.ofp` file is a Qualcomm Snapdragon or MediaTek Helio/Dimensity archive:
 
 ```bash
-# Unpack all partitions into ./extracted_ofp
+# Auto-detects chipset and unpacks all partitions into ./extracted_ofp
 ozipdecrypt-tools ofp CPH1901EX_11_A.16.ofp
 
-# Selectively extract only the Wi-Fi/modem partition (NON-HLOS.bin)
+# Selectively extract only the Wi-Fi/modem partition (NON-HLOS.bin / md1img)
 ozipdecrypt-tools ofp CPH1901EX_11_A.16.ofp --partition modem
+
+# Extract MediaTek OFP archive (A77, F1s, A83, Realme 3)
+ozipdecrypt-tools ofp CPH1827EX_11_A.21.ofp --out-dir ./extracted_mtk
 ```
 
 ### 3. Sideload a `.zip` Package Directly
