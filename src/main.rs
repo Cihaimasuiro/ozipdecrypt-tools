@@ -2,6 +2,7 @@ mod crypto;
 mod flash;
 mod ofp;
 mod ofp_mtk;
+mod ops;
 mod ozip;
 
 use anyhow::{bail, Result};
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 #[command(
     name = "ozipdecrypt-tools",
     version,
-    about = "Unified high-performance Rust CLI for decrypting .ozip/.ofp firmware archives and automating radio updates"
+    about = "Unified high-performance Rust CLI for decrypting .ozip/.ofp/.ops firmware archives and automating radio updates"
 )]
 struct Cli {
     /// Path to TOML file containing AES keys (optional, uses built-in database by default)
@@ -54,6 +55,17 @@ enum Commands {
         /// Explicitly select MediaTek mode (auto-detected by default)
         #[arg(long)]
         mtk: bool,
+    },
+    /// Decrypt and unpack a OnePlus .ops stock firmware archive
+    Ops {
+        /// Input .ops firmware file
+        input: PathBuf,
+        /// Directory to extract decrypted files into
+        #[arg(short, long, default_value = "./extracted_ops")]
+        out_dir: PathBuf,
+        /// Optional single partition to extract (e.g., "modem" or "boot.img")
+        #[arg(short, long)]
+        partition: Option<String>,
     },
     /// Directly sideload a decrypted .zip firmware package to an attached device
     Sideload {
@@ -119,6 +131,16 @@ fn main() -> Result<()> {
                 }
             }
         }
+        (
+            Some(Commands::Ops {
+                input,
+                out_dir,
+                partition,
+            }),
+            _,
+        ) => {
+            ops::extract_ops(&input, &out_dir, partition.as_deref())?;
+        }
         (Some(Commands::Sideload { zip_file }), _) => {
             flash::adb_sideload(&zip_file)?;
         }
@@ -137,7 +159,7 @@ fn main() -> Result<()> {
         (None, None) => {
             println!("ozipdecrypt-tools {}\n", env!("CARGO_PKG_VERSION"));
             println!("Usage:\n    ozipdecrypt-tools <command> [OPTIONS]\n    ozipdecrypt-tools <filename.ozip>\n");
-            println!("Commands:\n    ozip        Decrypt .ozip to .zip archive\n    ofp         Extract Qualcomm .ofp firmware archive\n    sideload    Sideload .zip update via ADB\n");
+            println!("Commands:\n    ozip        Decrypt .ozip to .zip archive\n    ofp         Extract Qualcomm/MediaTek .ofp firmware archive\n    ops         Extract OnePlus .ops firmware archive\n    sideload    Sideload .zip update via ADB\n");
             println!("Run 'ozipdecrypt-tools --help' for full options.");
         }
     }
@@ -375,5 +397,39 @@ mod tests {
             assert_eq!(key.len(), 16);
             assert_eq!(iv.len(), 16);
         }
+    }
+
+    #[test]
+    fn test_ops_key_update() {
+        let sbox = hex::decode(ops::SBOX_HEX).unwrap();
+        let iv = [0u32; 4];
+        let next_key = ops::key_update(iv, &ops::MBOX5, &sbox);
+        assert_ne!(next_key, [0u32; 4]);
+        let next_key2 = ops::key_update(iv, &ops::MBOX5, &sbox);
+        assert_eq!(next_key, next_key2);
+    }
+
+    #[test]
+    fn test_ops_xml_parsing() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<data>
+    <Sahara>
+        <File Path="prog_firehose_lite.elf" FileOffsetInSrc="10" SizeInByteInSrc="102400" Sha256="aabbcc"/>
+    </Sahara>
+    <Firmware>
+        <File Path="boot.img" FileOffsetInSrc="200" SizeInByteInSrc="67108864" Sha256="ddeeff"/>
+    </Firmware>
+</data>"#;
+        let items = ops::parse_ops_xml(xml).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].filename, "prog_firehose_lite.elf");
+        assert_eq!(items[0].start, 10 * 0x200);
+        assert_eq!(items[0].length, 102400);
+        assert!(items[0].is_encrypted);
+
+        assert_eq!(items[1].filename, "boot.img");
+        assert_eq!(items[1].start, 200 * 0x200);
+        assert_eq!(items[1].length, 67108864);
+        assert!(!items[1].is_encrypted);
     }
 }

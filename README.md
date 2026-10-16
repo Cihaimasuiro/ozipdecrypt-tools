@@ -11,7 +11,8 @@ Unified high-performance Rust CLI for decrypting Oppo, OnePlus, and Realme firmw
   - **Standalone Mode**: Single `.ozip` files starting with `OPPOENCRYPT!`.
   - **Zip Mode 1**: Standard OTA packages with `oppo_metadata` and `vbmeta.img`.
   - **Zip Mode 2**: Interleaved chunk encryption used by Snapdragon 450 devices (e.g., Oppo A3s `CPH1803`, Oppo A7 `CPH1901`, Oppo A5s `CPH1909`).
-- **Qualcomm OFP Unpacker**: Decrypts and unpacks Qualcomm `.ofp` stock firmware containers and allows selective partition extraction (such as `modem` / `NON-HLOS.bin` for Wi-Fi/radio repairs).
+- **Qualcomm & MediaTek OFP Unpackers**: Decrypts and unpacks Qualcomm Snapdragon and MediaTek Helio/Dimensity `.ofp` stock firmware containers with selective partition extraction (such as `modem` / `NON-HLOS.bin` for Wi-Fi/radio repairs).
+- **OnePlus OPS Unpacker**: Decrypts and extracts partitions from OnePlus `.ops` unbrick containers using the custom CFB-128 cipher engine, 256-byte S-Box expansion schedule, and XML metadata manifest parser.
 - **One-Command Sideload**: Automatically invokes `adb sideload` once decryption finishes.
 - **Built-in Key Database**: 35 preconfigured AES-128 keys matched automatically against Android / ZIP header magics (`PK\x03\x04`, `AVB0`, and `ANDR`). Custom keys can also be supplied via `keys.toml`.
 
@@ -65,7 +66,17 @@ ozipdecrypt-tools ofp CPH1901EX_11_A.16.ofp --partition modem
 ozipdecrypt-tools ofp CPH1827EX_11_A.21.ofp --out-dir ./extracted_mtk
 ```
 
-### 3. Sideload a `.zip` Package Directly
+### 3. Extract OnePlus `.ops` Stock Containers
+
+```bash
+# Decrypt and unpack all partitions into ./extracted_ops
+ozipdecrypt-tools ops OnePlus7Pro.ops
+
+# Selectively extract only the modem partition
+ozipdecrypt-tools ops OnePlus7Pro.ops --partition modem --out-dir ./extracted_ops
+```
+
+### 4. Sideload a `.zip` Package Directly
 
 ```bash
 ozipdecrypt-tools sideload update.zip
