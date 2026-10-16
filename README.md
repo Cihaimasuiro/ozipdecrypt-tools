@@ -1,6 +1,6 @@
 # ozipdecrypt-tools
 
-Unified high-performance Rust CLI for decrypting Oppo, OnePlus, and Realme firmware archives (`.ozip` and Qualcomm `.ofp`) and automating recovery/radio firmware updates.
+Unified high-performance Rust CLI for decrypting Oppo, OnePlus, and Realme firmware archives (`.ozip`, Qualcomm `.ofp`, MediaTek `.ofp`, and OnePlus `.ops`) and automating recovery/radio firmware updates.
 
 ---
 
@@ -128,7 +128,7 @@ Run the automated constants audit diffing against upstream Python modules:
 python tools/check_constants.py
 ```
 
-Run the built-in test suite (25 unit tests) covering bitwise operations, key derivation, streaming decryption, auto-detection, and robustness:
+Run the built-in test suite (26 unit tests) covering bitwise operations, key derivation, streaming decryption, auto-detection, robustness, and chunk boundary parity:
 ```bash
 cargo test
 ```
