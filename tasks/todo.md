@@ -134,13 +134,13 @@ Gate: v0.2.0 tagged and Phase 6 finished (no `println!` in the core, events thro
 - [x] Verification badge before extraction and on the result screen for `SyntheticOnly` and `Unverified` formats
 - [x] `VerifiedHeadOnly` shown as "head checked only"; `NoHashInManifest` as "no checksum available"
 - [x] Refuse an output folder that collides with the input; warn on a non-empty folder
-- [x] Free-disk-space check before starting
-- [x] Device-data warning for `persist`, `modemst1/2`, `fsg`, `nvbk`/`nv*` partitions
+- [x] Free-disk-space check before starting (Windows via GetDiskFreeSpaceExW; unconstrained on Unix/macOS for v0.3.0)
+- [x] Device-data heuristic warning for `persist`, `modemst1/2`, `fsg`, `nvbk`/`nv*` partitions
 - [x] No flash button, no `adb`, no network, no telemetry
 - [x] Non-ASCII, spaces and long Windows paths work
 
 ### 7.5 Tests
-- [x] State-machine tests (no rendering): transitions, cancel in each state, error mid-extraction (9 GUI unit tests)
+- [x] State-machine tests (no rendering): transitions, typed cancel, reporter event throttling, canonical collision guard, panic recovery (11 GUI unit tests)
 - [x] Core integration test with a recording reporter (event order, checksum statuses)
 - [ ] Manual matrix on Windows: synthetic file of each format; real CPH1901 `.ofp`; cancel mid-extraction; read-only output folder; low disk space; non-ASCII path; path with spaces; wrong file type; folder drop
 

@@ -7,8 +7,8 @@ use ozipdecrypt_core::{
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub enum WorkerMessage {
@@ -18,21 +18,58 @@ pub enum WorkerMessage {
     },
     Progress(ProgressEvent),
     ExtractionDone {
-        result: std::result::Result<ExtractSummary, String>,
+        result: std::result::Result<ExtractSummary, OzipError>,
         elapsed: Duration,
     },
 }
 
-struct GuiReporter {
+pub struct GuiReporter {
     tx: Sender<WorkerMessage>,
     ctx: egui::Context,
     cancelled: Arc<AtomicBool>,
+    last_progress_sent: Mutex<Instant>,
+}
+
+impl GuiReporter {
+    pub fn new(tx: Sender<WorkerMessage>, ctx: egui::Context, cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            tx,
+            ctx,
+            cancelled,
+            last_progress_sent: Mutex::new(
+                Instant::now()
+                    .checked_sub(Duration::from_secs(1))
+                    .unwrap_or_else(Instant::now),
+            ),
+        }
+    }
 }
 
 impl ProgressReporter for GuiReporter {
     fn on_event(&self, event: ProgressEvent) {
-        let _ = self.tx.send(WorkerMessage::Progress(event));
-        self.ctx.request_repaint();
+        match &event {
+            ProgressEvent::Progress {
+                bytes_done,
+                bytes_total,
+            } => {
+                let now = Instant::now();
+                if let Ok(mut last) = self.last_progress_sent.lock() {
+                    // Throttle per-chunk progress to 50ms intervals or final byte completion
+                    if now.duration_since(*last) >= Duration::from_millis(50)
+                        || bytes_done == bytes_total
+                    {
+                        *last = now;
+                        let _ = self.tx.send(WorkerMessage::Progress(event));
+                        self.ctx.request_repaint();
+                    }
+                }
+            }
+            _ => {
+                // Always forward lifecycle events (Started, ItemStarted, ItemDone, Warning, Finished) immediately
+                let _ = self.tx.send(WorkerMessage::Progress(event));
+                self.ctx.request_repaint();
+            }
+        }
     }
 
     fn is_cancelled(&self) -> bool {
@@ -116,12 +153,27 @@ impl OzipGuiApp {
         let keys = self.keys.clone();
 
         std::thread::spawn(move || {
-            let res = describe_container_with_keys(&path, &keys).map_err(|e| {
-                if let Some(ozip_err) = e.downcast_ref::<OzipError>() {
-                    map_ozip_error(ozip_err)
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                describe_container_with_keys(&path, &keys)
+            }))
+            .map_err(|panic_err| {
+                let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                    s.clone()
                 } else {
-                    e.to_string()
-                }
+                    "Internal worker panic".to_string()
+                };
+                format!("Worker thread panicked during inspection: {}", msg)
+            })
+            .and_then(|r| {
+                r.map_err(|e| {
+                    if let Some(ozip_err) = e.downcast_ref::<OzipError>() {
+                        map_ozip_error(ozip_err)
+                    } else {
+                        e.to_string()
+                    }
+                })
             });
 
             let _ = tx.send(WorkerMessage::InspectionDone { path, result: res });
@@ -157,11 +209,7 @@ impl OzipGuiApp {
             cancelling: false,
         };
 
-        let reporter = GuiReporter {
-            tx: tx.clone(),
-            ctx: ctx.clone(),
-            cancelled: cancel_flag,
-        };
+        let reporter = GuiReporter::new(tx.clone(), ctx.clone(), cancel_flag);
 
         std::thread::spawn(move || {
             let req = ExtractRequest {
@@ -171,7 +219,20 @@ impl OzipGuiApp {
             };
 
             let start = Instant::now();
-            let res = extract(&req, &keys, &reporter).map_err(|e| map_ozip_error(&e));
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                extract(&req, &keys, &reporter)
+            }))
+            .map_err(|panic_err| {
+                let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Internal worker panic".to_string()
+                };
+                OzipError::Other(format!("Worker thread panicked during extraction: {}", msg))
+            })
+            .and_then(|r| r);
             let elapsed = start.elapsed();
 
             let _ = tx.send(WorkerMessage::ExtractionDone {
@@ -294,11 +355,8 @@ impl OzipGuiApp {
                                 *speed_mb_s = (*bytes_done as f64 / 1_048_576.0) / secs;
                             }
                         }
-                        ProgressEvent::ItemDone { checksum, .. } => {
+                        ProgressEvent::ItemDone { .. } => {
                             *items_done += 1;
-                            if checksum == ChecksumStatus::Failed {
-                                warnings.push(format!("Checksum failed on '{}'", current_item));
-                            }
                         }
                         ProgressEvent::Warning(w) => {
                             warnings.push(w);
@@ -327,25 +385,25 @@ impl OzipGuiApp {
                             };
                         }
                     }
-                    Err(err_msg) => {
-                        if err_msg == "Operation cancelled." {
-                            if let AppState::Extracting { path, out_dir, .. } = &self.state {
-                                self.state = AppState::Cancelled {
-                                    path: path.clone(),
-                                    out_dir: out_dir.clone(),
-                                };
-                            }
-                        } else {
-                            let p = match &self.state {
-                                AppState::Extracting { path, .. } => Some(path.clone()),
-                                _ => None,
-                            };
-                            self.state = AppState::Error {
-                                path: p,
-                                message: "Extraction failed".to_string(),
-                                details: Some(err_msg),
+                    Err(OzipError::Cancelled) => {
+                        if let AppState::Extracting { path, out_dir, .. } = &self.state {
+                            self.state = AppState::Cancelled {
+                                path: path.clone(),
+                                out_dir: out_dir.clone(),
                             };
                         }
+                    }
+                    Err(err) => {
+                        let p = match &self.state {
+                            AppState::Extracting { path, .. } => Some(path.clone()),
+                            _ => None,
+                        };
+                        let err_msg = map_ozip_error(&err);
+                        self.state = AppState::Error {
+                            path: p,
+                            message: "Extraction failed".to_string(),
+                            details: Some(err_msg),
+                        };
                     }
                 }
             }
@@ -382,7 +440,7 @@ pub fn map_ozip_error(ozip_err: &OzipError) -> String {
             calculated,
         } => {
             format!(
-                "Integrity check mismatch on '{}': expected {}, calculated {}",
+                "Integrity check failed for partition '{}': expected SHA-256 {}, but calculated {}",
                 item, expected, calculated
             )
         }
@@ -396,6 +454,8 @@ pub fn map_ozip_error(ozip_err: &OzipError) -> String {
     }
 }
 
+/// Heuristic check for sensitive device-specific partitions (e.g. calibration, NVRAM, radio).
+/// This is solely used to drive the user warning banner preventing accidental flashing of factory images.
 pub fn is_device_specific_partition(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower.contains("persist")
@@ -404,6 +464,55 @@ pub fn is_device_specific_partition(name: &str) -> bool {
         || lower.contains("fsg")
         || lower.contains("nvbk")
         || lower.starts_with("nv")
+}
+
+pub fn normalize_path(p: &Path) -> PathBuf {
+    if let Ok(canon) = p.canonicalize() {
+        return canon;
+    }
+    use std::path::Component;
+    let mut components = Vec::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                components.pop();
+            }
+            c => components.push(c),
+        }
+    }
+    components.into_iter().collect()
+}
+
+pub fn paths_collide(out_dir: &Path, input: &Path) -> bool {
+    let norm_out = normalize_path(out_dir);
+    let norm_in = normalize_path(input);
+
+    let s_out = norm_out
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase();
+    let s_in = norm_in
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase();
+
+    if s_out == s_in {
+        return true;
+    }
+    if let Some(parent) = norm_in.parent() {
+        let s_parent = parent
+            .to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase();
+        if s_out == s_parent {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(windows)]
@@ -466,9 +575,29 @@ fn open_folder(path: &Path) {
 
 impl eframe::App for OzipGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 1. Process messages from background worker
-        while let Ok(msg) = self.rx.try_recv() {
-            self.handle_worker_message(msg);
+        // 1. Process messages from background worker (with disconnect handling)
+        loop {
+            match self.rx.try_recv() {
+                Ok(msg) => self.handle_worker_message(msg),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if matches!(
+                        self.state,
+                        AppState::Inspecting { .. } | AppState::Extracting { .. }
+                    ) {
+                        self.cancel_flag = None;
+                        self.state = AppState::Error {
+                            path: None,
+                            message: "Worker disconnected unexpectedly".to_string(),
+                            details: Some(
+                                "The background task terminated without sending a completion message."
+                                    .to_string(),
+                            ),
+                        };
+                    }
+                    break;
+                }
+            }
         }
 
         // 2. Handle file drag and drop (ignored during extraction or inspection)
@@ -546,7 +675,7 @@ impl eframe::App for OzipGuiApp {
                         ui.set_max_width(540.0);
                         ui.label(egui::RichText::new("Verification & Safety Notice").strong());
                         ui.label("• Qualcomm .ofp: Verified on real Oppo A7 (CPH1901) firmware file; see limits in docs.");
-                        ui.label("• .ozip / MTK .ofp / OPS: Verified on synthetic test vectors with 100% bit-for-bit cipher parity.");
+                        ui.label("• .ozip / MTK .ofp / OPS: Synthetic tests only; not yet verified on real firmware files.");
                         ui.label("• Flashing safety: Flashing tools are excluded. Factory persist images must NEVER be flashed.");
                     });
                 });
@@ -626,11 +755,7 @@ impl eframe::App for OzipGuiApp {
                 });
 
                 // Safety check: collision with input
-                let is_collision = if let Some(parent) = path.parent() {
-                    out_dir == path || out_dir == parent
-                } else {
-                    out_dir == path
-                };
+                let is_collision = paths_collide(out_dir, path);
                 if is_collision {
                     ui.colored_label(
                         egui::Color32::from_rgb(230, 80, 80),
@@ -812,7 +937,7 @@ impl eframe::App for OzipGuiApp {
                         ));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(format!(
-                                "Speed: {:.1} MB/s | Elapsed: {} | Item: {} / {}",
+                                "Avg Speed: {:.1} MB/s | Elapsed: {} | Item: {} / {}",
                                 *speed_mb_s,
                                 format_duration(start_time.elapsed()),
                                 *items_done,
@@ -1158,7 +1283,9 @@ mod tests {
             expected: "aaa".to_string(),
             calculated: "bbb".to_string(),
         };
-        assert!(map_ozip_error(&err_checksum).contains("Integrity check mismatch"));
+        let msg = map_ozip_error(&err_checksum);
+        assert!(msg.contains("Integrity check failed for partition 'boot.img'"));
+        assert!(msg.contains("expected SHA-256 aaa, but calculated bbb"));
 
         let err_cancel = OzipError::Cancelled;
         assert_eq!(map_ozip_error(&err_cancel), "Operation cancelled.");
@@ -1354,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extraction_cancelled_transitions_to_cancelled_state() {
+    fn test_extraction_cancelled_transitions_to_cancelled_state_typed() {
         let mut app = make_test_app();
         app.state = AppState::Extracting {
             path: PathBuf::from("firmware.ofp"),
@@ -1371,8 +1498,9 @@ mod tests {
             cancelling: true,
         };
 
+        // Typed OzipError::Cancelled matching:
         app.handle_worker_message(WorkerMessage::ExtractionDone {
-            result: Err("Operation cancelled.".to_string()),
+            result: Err(OzipError::Cancelled),
             elapsed: Duration::from_secs(1),
         });
 
@@ -1383,6 +1511,66 @@ mod tests {
             }
             other => panic!("Expected AppState::Cancelled, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_paths_collide() {
+        let file = PathBuf::from("D:/firmware/update.ofp");
+        let parent = PathBuf::from("D:/firmware");
+        let dest_same = PathBuf::from("D:/firmware/update.ofp");
+        let dest_child = PathBuf::from("D:/firmware/update_extracted");
+        let dest_other = PathBuf::from("E:/extracted");
+
+        assert!(paths_collide(&dest_same, &file));
+        assert!(paths_collide(&parent, &file));
+        assert!(!paths_collide(&dest_child, &file));
+        assert!(!paths_collide(&dest_other, &file));
+    }
+
+    #[test]
+    fn test_gui_reporter_throttles_progress_events() {
+        let (tx, rx) = channel();
+        let ctx = egui::Context::default();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reporter = GuiReporter::new(tx, ctx, cancel);
+
+        // Send Started (immediate)
+        reporter.on_event(ProgressEvent::Started {
+            total_items: 1,
+            total_bytes: 10000,
+        });
+
+        // Send two Progress events in immediate microsecond succession
+        reporter.on_event(ProgressEvent::Progress {
+            bytes_done: 100,
+            bytes_total: 10000,
+        });
+        reporter.on_event(ProgressEvent::Progress {
+            bytes_done: 200,
+            bytes_total: 10000,
+        });
+
+        // Send ItemDone (immediate)
+        reporter.on_event(ProgressEvent::ItemDone {
+            name: "test.img".to_string(),
+            checksum: ChecksumStatus::VerifiedFull,
+        });
+
+        let mut received = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            received.push(msg);
+        }
+
+        // Must receive Started, the first Progress, and ItemDone. Second rapid Progress should be throttled.
+        assert!(received.len() >= 3);
+        assert!(matches!(
+            received[0],
+            WorkerMessage::Progress(ProgressEvent::Started { .. })
+        ));
+        assert!(matches!(
+            received.last().unwrap(),
+            WorkerMessage::Progress(ProgressEvent::ItemDone { .. })
+        ));
     }
 
     #[test]
