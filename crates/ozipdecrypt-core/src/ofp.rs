@@ -203,7 +203,16 @@ pub(crate) fn find_and_decrypt_xml(
     file.read_exact(&mut buf8)?;
     let offset_pages = u32::from_le_bytes(buf8[0..4].try_into().unwrap()) as u64;
     let mut length = u32::from_le_bytes(buf8[4..8].try_into().unwrap()) as u64;
-    let data_offset = offset_pages * page_size;
+    let data_offset = match offset_pages.checked_mul(page_size) {
+        Some(offset) => offset,
+        None => {
+            bail!(
+                "Invalid OFP manifest offset in trailer: offset_pages={:#x}, page_size={:#x}",
+                offset_pages,
+                page_size
+            );
+        }
+    };
 
     if length < 200 {
         // A57 length calculation hack from ofp_qc_decrypt.py
@@ -213,7 +222,11 @@ pub(crate) fn find_and_decrypt_xml(
     }
 
     const MAX_XML_MANIFEST_LEN: u64 = 16 * 1024 * 1024; // 16 MB max XML manifest
-    if length > MAX_XML_MANIFEST_LEN || data_offset + length > file_size {
+    let out_of_bounds = match data_offset.checked_add(length) {
+        Some(end) => end > file_size,
+        None => true,
+    };
+    if length > MAX_XML_MANIFEST_LEN || out_of_bounds {
         bail!(
             "Invalid OFP manifest offset/length in trailer: offset={:#x}, length={:#x}, file_size={:#x}",
             data_offset,

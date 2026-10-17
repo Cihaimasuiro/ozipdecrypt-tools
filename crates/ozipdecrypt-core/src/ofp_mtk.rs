@@ -308,6 +308,29 @@ pub fn extract_ofp_mtk_partitions_with_reporter(
             );
         }
 
+        const MAX_MTK_ENC_LEN: u64 = 16 * 1024 * 1024; // 16 MB max encrypted header
+        if entry.enc_length > MAX_MTK_ENC_LEN {
+            bail!(
+                "Corrupted MTK entry '{}': enc_length ({}) exceeds 16 MB safety limit",
+                entry.filename,
+                entry.enc_length
+            );
+        }
+
+        let out_of_bounds = match entry.start.checked_add(entry.length) {
+            Some(end) => end > file_size,
+            None => true,
+        };
+        if out_of_bounds {
+            bail!(
+                "Corrupted MTK entry '{}': start ({:#x}) + length ({:#x}) exceeds file size ({:#x})",
+                entry.filename,
+                entry.start,
+                entry.length,
+                file_size
+            );
+        }
+
         let part_path = crate::crypto::get_part_path(&out_file_path);
 
         let write_res = (|| -> Result<()> {
@@ -316,22 +339,19 @@ pub fn extract_ofp_mtk_partitions_with_reporter(
             let mut remaining_len = entry.length;
 
             if entry.enc_length > 0 {
-                let mut enc_data = vec![0u8; entry.enc_length as usize];
-                file.read_exact(&mut enc_data)?;
-
                 // AES CFB pad to 16 bytes if not divisible by 16
                 let padded_len = if entry.enc_length % 16 != 0 {
                     (entry.enc_length + (16 - (entry.enc_length % 16))) as usize
                 } else {
                     entry.enc_length as usize
                 };
-                let mut pad_buf = enc_data.clone();
-                pad_buf.resize(padded_len, 0u8);
+                let mut enc_data = vec![0u8; padded_len];
+                file.read_exact(&mut enc_data[..entry.enc_length as usize])?;
 
                 let cipher = Aes128Cfb::new(&aes_key.into(), &aes_iv.into());
-                cipher.decrypt(&mut pad_buf);
+                cipher.decrypt(&mut enc_data);
 
-                out.write_all(&pad_buf[..entry.enc_length as usize])?;
+                out.write_all(&enc_data[..entry.enc_length as usize])?;
                 remaining_len = remaining_len.saturating_sub(entry.enc_length);
                 cumulative_done += entry.enc_length;
                 reporter.on_event(ProgressEvent::Progress {

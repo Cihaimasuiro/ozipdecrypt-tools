@@ -818,6 +818,129 @@ mod tests {
     }
 
     #[test]
+    fn test_mtk_oversized_enc_length_rejection() {
+        use ozipdecrypt_core::ofp_mtk;
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "mtk_oversized_enc_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let mtk_file = temp_dir.join("oversized.ofp");
+        let out_dir = temp_dir.join("out");
+
+        let file_size = 0x2000usize;
+        let mut data = vec![0u8; file_size];
+
+        // 1. Setup magic block at offset 0 matching derive_mtk_key(8)
+        let (key, iv) = ofp_mtk::derive_mtk_key(8).unwrap();
+        let mut s0 = aes::Block::from(iv);
+        let aes_cipher = aes::Aes128::new(&key.into());
+        aes_cipher.encrypt_block(&mut s0);
+        let mut magic_block = [0u8; 16];
+        for i in 0..16 {
+            magic_block[i] = b"MMMMMMMMMMMMMMMM"[i] ^ s0[i];
+        }
+        data[0..16].copy_from_slice(&magic_block);
+
+        // 2. Setup secondary partition table (hdr2) with 1 entry at file_size - 0x60 - 0x6C
+        let hdr2_offset = file_size - 0x60 - 0x6C;
+        let mut hdr2 = [0u8; 0x60];
+        // name (0..32)
+        hdr2[0..4].copy_from_slice(b"boot");
+        // start (32..40)
+        hdr2[32..40].copy_from_slice(&0x200u64.to_le_bytes());
+        // length (40..48)
+        hdr2[40..48].copy_from_slice(&(64 * 1024 * 1024u64).to_le_bytes());
+        // enc_length (48..56): 32 MB (> 16 MB cap)
+        let bad_enc_len = 32 * 1024 * 1024u64;
+        hdr2[48..56].copy_from_slice(&bad_enc_len.to_le_bytes());
+        // filename (56..88)
+        hdr2[56..64].copy_from_slice(b"boot.img");
+        // obfuscate hdr2 with geyixue key
+        let geyixue = b"geyixue";
+        for (i, b) in hdr2.iter_mut().enumerate() {
+            let k = geyixue[i % geyixue.len()];
+            let val = *b ^ k;
+            *b = val.rotate_left(4);
+        }
+        data[hdr2_offset..hdr2_offset + 0x60].copy_from_slice(&hdr2);
+
+        // 3. Setup trailer (hdr) at file_size - 0x6C with hdr2entries = 1
+        let trailer_offset = file_size - 0x6C;
+        let mut hdr = [0u8; 0x6C];
+        hdr[72..74].copy_from_slice(&1u16.to_le_bytes());
+        for (i, b) in hdr.iter_mut().enumerate() {
+            let k = geyixue[i % geyixue.len()];
+            let val = *b ^ k;
+            *b = val.rotate_left(4);
+        }
+        data[trailer_offset..trailer_offset + 0x6C].copy_from_slice(&hdr);
+
+        std::fs::write(&mtk_file, &data).unwrap();
+
+        let reporter = ozipdecrypt_core::NoopReporter;
+        let res =
+            ofp_mtk::extract_ofp_mtk_partitions_with_reporter(&mtk_file, &out_dir, None, &reporter);
+        assert!(res.is_err(), "Oversized enc_length must be rejected");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exceeds 16 MB safety limit"),
+            "Expected 'exceeds 16 MB safety limit', got: {}",
+            err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_ofp_qc_offset_overflow_rejection() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ofp_overflow_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let ofp_file = temp_dir.join("overflow.ofp");
+
+        let file_size = 0x2000usize;
+        let mut data = vec![0u8; file_size];
+        let page_size = 0x200usize;
+        let trailer_offset = file_size - page_size;
+
+        // Magic 0x7CEF at trailer_offset + 0x10 to detect page_size 0x200
+        data[trailer_offset + 0x10..trailer_offset + 0x14]
+            .copy_from_slice(&0x7CEFu32.to_le_bytes());
+
+        // Offset_pages at trailer_offset + 0x14 set to u32::MAX (large offset that causes data_offset + length overflow or > file_size)
+        data[trailer_offset + 0x14..trailer_offset + 0x18].copy_from_slice(&u32::MAX.to_le_bytes());
+        // Length = 1000 (> 200)
+        data[trailer_offset + 0x18..trailer_offset + 0x1C].copy_from_slice(&1000u32.to_le_bytes());
+
+        std::fs::write(&ofp_file, &data).unwrap();
+
+        let out_dir = temp_dir.join("out");
+        let reporter = ozipdecrypt_core::NoopReporter;
+        let keys = crypto::KeyConfig::default();
+        let res =
+            ofp::extract_ofp_partitions_with_reporter(&ofp_file, &out_dir, None, &keys, &reporter);
+        assert!(res.is_err(), "Overflowing offset/length must be rejected");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid OFP manifest offset"),
+            "Expected 'Invalid OFP manifest offset', got: {}",
+            err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn test_profile_xml_parsing() {
         let xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <data>
