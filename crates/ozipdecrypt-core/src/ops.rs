@@ -511,8 +511,9 @@ pub(crate) fn extract_ops_xml(
         0
     };
 
-    if file_size < 0x200 + xml_length + xml_pad {
-        bail!("Invalid XML offset in OPS container header.");
+    const MAX_OPS_XML_LEN: u64 = 16 * 1024 * 1024; // 16 MB max XML manifest
+    if xml_length > MAX_OPS_XML_LEN || file_size < 0x200 + xml_length + xml_pad {
+        bail!("Invalid XML offset or length in OPS container header.");
     }
 
     let xml_offset = file_size - 0x200 - (xml_length + xml_pad);

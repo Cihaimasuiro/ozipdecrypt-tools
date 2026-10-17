@@ -26,6 +26,6 @@ If you discover a security vulnerability or security bug (such as path traversal
 
 ## Security Architecture & Defenses
 
-- **Path Traversal Guard**: All partition and file extraction targets pass through `safe_join`, rejecting absolute paths, `..` directory traversal, Windows drive prefixes, and NUL bytes.
-- **Resource Limits**: Chunk-based streaming prevents unbounded memory allocation on multi-gigabyte partitions.
-- **Strict Checksum Enforcements**: Checksums are computed inline and verified before final output promotion.
+- **Path Traversal Guard**: All partition and file extraction targets across OFP, OPS, and OZIP containers are validated via `safe_join`, rejecting absolute paths, `..` directory traversal, Windows drive prefixes or NTFS alternate data streams (`:`), and NUL bytes.
+- **Resource Limits & Allocation Bounds**: Chunk-based streaming prevents unbounded memory consumption on large partitions. Container headers, XML manifests, and decrypt headers enforce strict length bounds (16 MB ceiling) and file-boundary checks to prevent memory exhaustion from malformed files.
+- **Strict Checksum Enforcements**: Inline checksum computation for supported formats with verification before final output promotion.
