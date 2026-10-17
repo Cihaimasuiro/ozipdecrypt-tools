@@ -4,13 +4,72 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag (e.g. v0.3.0 or v0.3.0-rc1)"
+        required: false
+        default: "v0.3.0-rc1"
 
 permissions:
   contents: write
 
 jobs:
+  verify-gate:
+    name: Verify Release Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check constants audit
+        run: python tools/check_constants.py
+
+      - name: Check code formatting
+        run: cargo fmt --check
+
+      - name: Check Clippy lints
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Run workspace test suite
+        run: cargo test --workspace --verbose
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag_name }}"
+          fi
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          echo "Release tag: $TAG | Cargo.toml version: $VERSION"
+          if [[ "$TAG" == v* ]]; then
+            EXPECTED_VERSION="${TAG#v}"
+            # Strip pre-release suffix if present (e.g., 0.3.0-rc1 -> 0.3.0)
+            BASE_EXPECTED="${EXPECTED_VERSION%%-*}"
+            if [ "$BASE_EXPECTED" != "$VERSION" ]; then
+              echo "Error: Tag version ($EXPECTED_VERSION) does not match Cargo.toml ($VERSION)"
+              exit 1
+            fi
+          fi
+
   build-release:
     name: Build (${{ matrix.target }})
+    needs: verify-gate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -26,7 +85,7 @@ jobs:
             bin_suffix: ""
             archive_format: tar.gz
             rustflags: ""
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             bin_suffix: ""
             archive_format: tar.gz
@@ -45,7 +104,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -62,26 +121,28 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") { $tag = "${{ inputs.tag_name }}" }
           $dir = "ozipdecrypt-$tag-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $dir
           Copy-Item "target/${{ matrix.target }}/release/ozipdecrypt-gui.exe" "$dir/"
           Copy-Item "target/${{ matrix.target }}/release/ozipdecrypt-tools.exe" "$dir/"
           Copy-Item "README.md" "$dir/"
           Copy-Item "LICENSE" "$dir/"
-          if (Test-Path "keys.toml") { Copy-Item "keys.toml" "$dir/" }
+          if (Test-Path "keys.toml.example") { Copy-Item "keys.toml.example" "$dir/" }
           Compress-Archive -Path "$dir" -DestinationPath "$dir.zip"
 
       - name: Package artifacts (Unix)
         if: matrix.os != 'windows-latest'
         run: |
           tag="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then tag="${{ inputs.tag_name }}"; fi
           dir="ozipdecrypt-$tag-${{ matrix.target }}"
           mkdir -p "$dir"
           cp "target/${{ matrix.target }}/release/ozipdecrypt-gui" "$dir/"
           cp "target/${{ matrix.target }}/release/ozipdecrypt-tools" "$dir/"
           cp README.md "$dir/"
           cp LICENSE "$dir/"
-          if [ -f keys.toml ]; then cp keys.toml "$dir/"; fi
+          if [ -f keys.toml.example ]; then cp keys.toml.example "$dir/"; fi
           tar -czvf "$dir.tar.gz" "$dir"
 
       - name: Upload release asset
@@ -94,8 +155,9 @@ jobs:
 
   publish:
     name: Publish Release
-    needs: build-release
+    needs: [verify-gate, build-release]
     runs-on: ubuntu-latest
+    if: always() && needs.verify-gate.result == 'success' && !cancelled() && needs.build-release.result != 'cancelled'
     steps:
       - name: Download all built packages
         uses: actions/download-artifact@v4
@@ -112,6 +174,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
           files: |
             dist/ozipdecrypt-*
             dist/SHA256SUMS

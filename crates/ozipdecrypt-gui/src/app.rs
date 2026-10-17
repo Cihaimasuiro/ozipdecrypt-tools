@@ -28,6 +28,7 @@ pub struct GuiReporter {
     ctx: egui::Context,
     cancelled: Arc<AtomicBool>,
     last_progress_sent: Mutex<Instant>,
+    pending_progress: Mutex<Option<(u64, u64)>>,
 }
 
 impl GuiReporter {
@@ -41,6 +42,7 @@ impl GuiReporter {
                     .checked_sub(Duration::from_secs(1))
                     .unwrap_or_else(Instant::now),
             ),
+            pending_progress: Mutex::new(None),
         }
     }
 }
@@ -53,19 +55,51 @@ impl ProgressReporter for GuiReporter {
                 bytes_total,
             } => {
                 let now = Instant::now();
+                if let Ok(mut pending) = self.pending_progress.lock() {
+                    *pending = Some((*bytes_done, *bytes_total));
+                }
                 if let Ok(mut last) = self.last_progress_sent.lock() {
                     // Throttle per-chunk progress to 50ms intervals or final byte completion
                     if now.duration_since(*last) >= Duration::from_millis(50)
                         || bytes_done == bytes_total
                     {
                         *last = now;
+                        if let Ok(mut pending) = self.pending_progress.lock() {
+                            *pending = None;
+                        }
                         let _ = self.tx.send(WorkerMessage::Progress(event));
                         self.ctx.request_repaint();
                     }
                 }
             }
+            ProgressEvent::ItemDone { .. } => {
+                // Ensure any pending throttled progress is forwarded before ItemDone so progress bar reaches 100%
+                if let Ok(mut pending) = self.pending_progress.lock() {
+                    if let Some((done, total)) = pending.take() {
+                        let _ = self.tx.send(WorkerMessage::Progress(ProgressEvent::Progress {
+                            bytes_done: done,
+                            bytes_total: total,
+                        }));
+                    }
+                }
+                let _ = self.tx.send(WorkerMessage::Progress(event));
+                self.ctx.request_repaint();
+            }
+            ProgressEvent::Finished => {
+                // Flush any pending progress before final finish event
+                if let Ok(mut pending) = self.pending_progress.lock() {
+                    if let Some((done, total)) = pending.take() {
+                        let _ = self.tx.send(WorkerMessage::Progress(ProgressEvent::Progress {
+                            bytes_done: done,
+                            bytes_total: total,
+                        }));
+                    }
+                }
+                let _ = self.tx.send(WorkerMessage::Progress(event));
+                self.ctx.request_repaint();
+            }
             _ => {
-                // Always forward lifecycle events (Started, ItemStarted, ItemDone, Warning, Finished) immediately
+                // Always forward lifecycle events (Started, ItemStarted, Warning) immediately
                 let _ = self.tx.send(WorkerMessage::Progress(event));
                 self.ctx.request_repaint();
             }
@@ -581,6 +615,9 @@ impl eframe::App for OzipGuiApp {
                 Ok(msg) => self.handle_worker_message(msg),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    // Note: self.tx is retained by OzipGuiApp, so Disconnected cannot fire under normal operation.
+                    // catch_unwind in the spawned worker threads is the real guard against worker crashes/panics.
+                    // This match arm remains as a secondary defensive fallback.
                     if matches!(
                         self.state,
                         AppState::Inspecting { .. } | AppState::Extracting { .. }

@@ -46,6 +46,9 @@ cargo run --release -p ozipdecrypt-gui
 
 The optimized binaries will be compiled to `target/release/ozipdecrypt-gui` and `target/release/ozipdecrypt-tools` (or `.exe` on Windows).
 
+> [!NOTE]
+> **Linux Compatibility**: Pre-built Linux release binaries are compiled on Ubuntu 22.04 LTS and require `glibc 2.35+` and GTK 3 (`libgtk-3-0`). On older distributions, compile directly from source using `cargo build --release --workspace`.
+
 ---
 
 ## Quick Start (Zero-Config Auto-Detection)
@@ -168,7 +171,7 @@ Run the automated constants audit diffing against upstream Python modules:
 python tools/check_constants.py
 ```
 
-Run the built-in test suite (44 active unit tests + 1 doc-test):
+Run the built-in test suite:
 ```bash
 cargo test --workspace
 ```
