@@ -670,12 +670,24 @@ pub fn extract_ozip_partitions_with_reporter(
                 continue;
             }
 
-            let file_name = Path::new(&orgfilename).file_name().unwrap();
-            let dest_path = out_dir.join(file_name);
+            let raw_name = Path::new(&orgfilename).file_name().ok_or_else(|| {
+                OzipError::Other(format!(
+                    "Invalid file entry name in archive: {}",
+                    orgfilename
+                ))
+            })?;
+            let raw_name_str = raw_name.to_str().ok_or_else(|| {
+                OzipError::Other(format!(
+                    "Non-UTF8 file entry name in archive: {}",
+                    orgfilename
+                ))
+            })?;
+            let dest_path = crate::crypto::safe_join(out_dir, raw_name_str)?;
             let part_path = crate::crypto::get_part_path(&dest_path);
+            let file_name = raw_name_str.to_string();
 
             reporter.on_event(ProgressEvent::ItemStarted {
-                name: file_name.to_string_lossy().to_string(),
+                name: file_name.clone(),
                 size: entry.size(),
             });
 
@@ -712,15 +724,11 @@ pub fn extract_ozip_partitions_with_reporter(
             let final_size = dest_path.metadata()?.len();
 
             reporter.on_event(ProgressEvent::ItemDone {
-                name: file_name.to_string_lossy().to_string(),
+                name: file_name.clone(),
                 checksum: ChecksumStatus::NoHashInManifest,
             });
 
-            results.push((
-                file_name.to_string_lossy().to_string(),
-                final_size,
-                ChecksumStatus::NoHashInManifest,
-            ));
+            results.push((file_name, final_size, ChecksumStatus::NoHashInManifest));
         }
     } else {
         // Mode 1 extraction
@@ -763,14 +771,26 @@ pub fn extract_ozip_partitions_with_reporter(
                 continue;
             }
 
-            let file_name = Path::new(&orgfilename).file_name().unwrap();
-            let dest_path = out_dir.join(file_name);
+            let raw_name = Path::new(&orgfilename).file_name().ok_or_else(|| {
+                OzipError::Other(format!(
+                    "Invalid file entry name in archive: {}",
+                    orgfilename
+                ))
+            })?;
+            let raw_name_str = raw_name.to_str().ok_or_else(|| {
+                OzipError::Other(format!(
+                    "Non-UTF8 file entry name in archive: {}",
+                    orgfilename
+                ))
+            })?;
+            let dest_path = crate::crypto::safe_join(out_dir, raw_name_str)?;
             let part_path = crate::crypto::get_part_path(&dest_path);
+            let file_name = raw_name_str.to_string();
 
             let file_size = entry.size();
 
             reporter.on_event(ProgressEvent::ItemStarted {
-                name: file_name.to_string_lossy().to_string(),
+                name: file_name.clone(),
                 size: file_size,
             });
 
@@ -816,15 +836,11 @@ pub fn extract_ozip_partitions_with_reporter(
             let final_size = dest_path.metadata()?.len();
 
             reporter.on_event(ProgressEvent::ItemDone {
-                name: file_name.to_string_lossy().to_string(),
+                name: file_name.clone(),
                 checksum: ChecksumStatus::NoHashInManifest,
             });
 
-            results.push((
-                file_name.to_string_lossy().to_string(),
-                final_size,
-                ChecksumStatus::NoHashInManifest,
-            ));
+            results.push((file_name, final_size, ChecksumStatus::NoHashInManifest));
         }
     }
 

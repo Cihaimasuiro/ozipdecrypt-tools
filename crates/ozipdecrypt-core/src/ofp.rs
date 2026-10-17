@@ -212,7 +212,8 @@ pub(crate) fn find_and_decrypt_xml(
             .saturating_sub(0x57);
     }
 
-    if data_offset + length > file_size {
+    const MAX_XML_MANIFEST_LEN: u64 = 16 * 1024 * 1024; // 16 MB max XML manifest
+    if length > MAX_XML_MANIFEST_LEN || data_offset + length > file_size {
         bail!(
             "Invalid OFP manifest offset/length in trailer: offset={:#x}, length={:#x}, file_size={:#x}",
             data_offset,
@@ -453,6 +454,13 @@ fn extract_single_item(
         } else {
             // Encrypted partition: decrypt header with AES-128-CFB, copy remaining payload
             let decrypt_len = std::cmp::min(item.decrypt_size, rlength as usize);
+            const MAX_DECRYPT_HEADER_LEN: usize = 16 * 1024 * 1024; // 16 MB max header decrypt
+            if decrypt_len > MAX_DECRYPT_HEADER_LEN {
+                bail!(
+                    "Corrupt partition header: decrypt size {} exceeds safety threshold",
+                    decrypt_len
+                );
+            }
             let mut enc_head = vec![0u8; decrypt_len];
             src_file.read_exact(&mut enc_head)?;
 

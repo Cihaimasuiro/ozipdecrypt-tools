@@ -187,6 +187,13 @@ pub fn extract_ofp_mtk_partitions_with_reporter(
     mtk_shuffle(hdr_key, &mut hdr);
 
     let hdr2entries = u16::from_le_bytes(hdr[72..74].try_into().unwrap()) as u64;
+    const MAX_MTK_ENTRIES: u64 = 1000;
+    if hdr2entries > MAX_MTK_ENTRIES {
+        bail!(
+            "Invalid MediaTek partition table: entry count {} exceeds safety limit",
+            hdr2entries
+        );
+    }
 
     let hdr2_length = hdr2entries * 0x60;
     if file_size < hdr2_length + hdr_length {

@@ -737,6 +737,87 @@ mod tests {
     }
 
     #[test]
+    fn test_ozip_malicious_path_rejection() {
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ozip_malicious_path_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let ozip_file = temp_dir.join("malicious.ozip");
+        let out_dir = temp_dir.join("extracted");
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        {
+            let f = File::create(&ozip_file).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opt =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+            // Entry named ".."
+            zw.start_file("..", opt).unwrap();
+            zw.write_all(b"EVIL_PARENT").unwrap();
+
+            // Entry with NTFS ADS colon "boot:evil"
+            zw.start_file("boot:evil.img", opt).unwrap();
+            zw.write_all(b"EVIL_ADS").unwrap();
+
+            zw.finish().unwrap();
+        }
+
+        let key_config = crypto::KeyConfig::default();
+        // Trying to extract ".." should return Err and NOT panic
+        let res = ozip::extract_ozip_partition(&ozip_file, &out_dir, "..", &key_config);
+        assert!(res.is_err());
+
+        // Trying to extract ADS path "boot:evil" should be rejected by safe_join and NOT panic
+        let res_ads =
+            ozip::extract_ozip_partition(&ozip_file, &out_dir, "boot:evil.img", &key_config);
+        assert!(res_ads.is_err());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_ops_oversized_manifest_rejection() {
+        use std::io::Write;
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ops_oversized_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let ops_file = temp_dir.join("oversized.ops");
+
+        {
+            let mut f = std::fs::File::create(&ops_file).unwrap();
+            // Write 1 MB of dummy payload
+            f.write_all(&vec![0u8; 1024 * 1024]).unwrap();
+
+            // Write 0x200 header trailer with xml_length = 32 MB (> 16 MB cap)
+            let mut hdr = [0u8; 0x200];
+            let xml_len = 32 * 1024 * 1024u32;
+            hdr[0x18..0x1C].copy_from_slice(&xml_len.to_le_bytes());
+            f.write_all(&hdr).unwrap();
+        }
+
+        let out_dir = temp_dir.join("out");
+        let reporter = ozipdecrypt_core::NoopReporter;
+        let res = ops::extract_ops_partitions_with_reporter(&ops_file, &out_dir, None, &reporter);
+        assert!(res.is_err());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn test_profile_xml_parsing() {
         let xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <data>
