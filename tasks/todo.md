@@ -148,12 +148,16 @@ Gate: v0.2.0 tagged and Phase 6 finished (no `println!` in the core, events thro
 - [x] Release workflow on a version tag: Windows x86_64, Linux x86_64, macOS arm64 and x86_64 (.github/workflows/release.yml)
 - [x] Windows static C runtime; plain `.exe` and `.zip`
 - [x] `SHA256SUMS` attached to the release
-- [x] README: "drag, choose, extract" steps, verification matrix, unsigned-binary note (SmartScreen, Gatekeeper, antivirus)
+- [x] README: "drag, choose, extract" steps, verification matrix, unsigned-binary note (SmartScreen, Gatekeeper, antivirus), Linux distro requirements
+- [x] M4 review fixes: retired `macos-13` runner replaced with `macos-latest` cross-compiling to `x86_64-apple-darwin`, `keys.toml.example` template packaging without private keys risk, `verify-gate` quality gate job, `workflow_dispatch` dry-run trigger, and resilient `publish` job
+- [x] Reporter & UI review fixes: `GuiReporter` flushes pending throttled progress on `ItemDone` / `Finished`, `Disconnected` match arm clarified as secondary defensive guard behind `catch_unwind`
 
-### 7.7 M5 Acceptance
-- [ ] Real CPH1901 `.ofp` extracted in the GUI: SHA-256 of every output file equals the CLI's
-- [ ] Peak memory comparable to the CLI
-- [ ] Not in scope (confirmed): sideload, flashing, `keys.toml` editor, re-encryption, batch queue, auto-update, translations
+### 7.7 M5 Acceptance (Real Firmware Run Gate)
+- [ ] 1. Extract real CPH1901 `.ofp` with CLI into folder A and GUI into folder B
+- [ ] 2. Compare SHA-256 (`Get-FileHash`) for all 61 output partitions between folder A, folder B, and `docs/qualcomm_ofp_verification.md`
+- [ ] 3. Mid-way cancel test on large partition (`system.img`) leaves zero `.part` files
+- [ ] 4. Confirm GUI window stays responsive throughout inspection and extraction
+- [ ] 5. Note peak RAM of GUI vs CLI
 
 ### Checkpoint 7
 - [ ] M1 to M5 met
