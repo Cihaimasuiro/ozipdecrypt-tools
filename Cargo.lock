@@ -356,6 +356,7 @@ dependencies = [
  "cipher",
  "clap",
  "hex",
+ "md-5",
  "ozipdecrypt-core",
  "sha2",
  "zip",

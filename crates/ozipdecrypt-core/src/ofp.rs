@@ -403,7 +403,7 @@ fn extract_single_item(
     Ok(())
 }
 
-fn verify_checksums(
+pub fn verify_checksums(
     file_path: &Path,
     sha256_sum: &str,
     md5_sum: &str,

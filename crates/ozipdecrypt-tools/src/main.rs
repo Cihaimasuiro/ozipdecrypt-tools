@@ -1228,4 +1228,36 @@ mod tests {
 
         let _ = std::fs::remove_file(&bad_ozip);
     }
+
+    #[test]
+    fn test_ofp_checksum_verification_rules() {
+        let tmp_dir = std::env::temp_dir();
+        let test_file = tmp_dir.join("test_checksum_verify.bin");
+        let content = b"OPPO_FIRMWARE_PAYLOAD_TEST_DATA_BLOCK";
+        std::fs::write(&test_file, content).unwrap();
+
+        let real_md5 = format!("{:x}", md5::Md5::digest(content));
+        let real_sha256 = format!("{:x}", sha2::Sha256::digest(content));
+        let fake_hash = "deadbeefdeadbeefdeadbeefdeadbeef";
+
+        // 1. Both valid: must pass
+        assert!(ofp::verify_checksums(&test_file, &real_sha256, &real_md5, false).is_ok());
+
+        // 2. MD5 valid, SHA256 invalid (sparse container behavior): must pass matching upstream
+        assert!(ofp::verify_checksums(&test_file, fake_hash, &real_md5, false).is_ok());
+
+        // 3. SHA256 valid, MD5 invalid: must pass matching upstream
+        assert!(ofp::verify_checksums(&test_file, &real_sha256, fake_hash, false).is_ok());
+
+        // 4. Both invalid: MUST HARD FAIL
+        assert!(ofp::verify_checksums(&test_file, fake_hash, fake_hash, false).is_err());
+
+        // 5. Only MD5 provided, but invalid: MUST HARD FAIL
+        assert!(ofp::verify_checksums(&test_file, "", fake_hash, false).is_err());
+
+        // 6. Only SHA256 provided, but invalid: MUST HARD FAIL
+        assert!(ofp::verify_checksums(&test_file, fake_hash, "", false).is_err());
+
+        let _ = std::fs::remove_file(&test_file);
+    }
 }
