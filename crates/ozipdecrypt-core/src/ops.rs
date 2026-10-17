@@ -382,6 +382,12 @@ pub fn extract_ops_partitions_with_reporter(
             let mut out = File::create(&part_path)
                 .with_context(|| format!("Failed to create {}", part_path.display()))?;
 
+            let mut hasher = if !item.sha256.is_empty() {
+                Some(Sha256::new())
+            } else {
+                None
+            };
+
             if item.is_encrypted {
                 let mut remaining = item.length;
                 let mut rkey = MASTER_KEY;
@@ -402,6 +408,9 @@ pub fn extract_ops_partitions_with_reporter(
                         is_whole_input_short,
                     );
                     out.write_all(&plain)?;
+                    if let Some(ref mut h) = hasher {
+                        h.update(&plain);
+                    }
                     rkey = next_rkey;
                     remaining -= to_read as u64;
                     cumulative_done += to_read as u64;
@@ -419,13 +428,13 @@ pub fn extract_ops_partitions_with_reporter(
                         return Err(OzipError::Cancelled.into());
                     }
                     let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
-                    let n = file.read(&mut buf[..to_read])?;
-                    if n == 0 {
-                        break;
+                    file.read_exact(&mut buf[..to_read])?;
+                    out.write_all(&buf[..to_read])?;
+                    if let Some(ref mut h) = hasher {
+                        h.update(&buf[..to_read]);
                     }
-                    out.write_all(&buf[..n])?;
-                    remaining -= n as u64;
-                    cumulative_done += n as u64;
+                    remaining -= to_read as u64;
+                    cumulative_done += to_read as u64;
                     reporter.on_event(ProgressEvent::Progress {
                         bytes_done: cumulative_done,
                         bytes_total: total_bytes,
@@ -437,31 +446,22 @@ pub fn extract_ops_partitions_with_reporter(
             drop(out);
 
             // Verify SHA256 if present
-            let chk_status = if !item.sha256.is_empty() {
-                let mut f = File::open(&part_path)?;
-                let mut hasher = Sha256::new();
-                let mut buf = [0u8; 64 * 1024];
-                while let Ok(n) = f.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    hasher.update(&buf[..n]);
-                }
+            let chk_status = if let Some(mut h) = hasher {
                 if item.length % 0x1000 > 0 {
                     let pad = 0x1000 - (item.length % 0x1000);
                     let zeroes = [0u8; 4096];
-                    hasher.update(&zeroes[..pad as usize]);
+                    h.update(&zeroes[..pad as usize]);
                 }
-                let digest_str = format!("{:x}", hasher.finalize());
+                let digest_str = format!("{:x}", h.finalize());
                 if digest_str.eq_ignore_ascii_case(&item.sha256) {
                     ChecksumStatus::VerifiedFull
                 } else {
-                    bail!(
-                        "SHA-256 verification failed for '{}'! Computed {}, expected {}",
-                        item.filename,
-                        digest_str,
-                        item.sha256
-                    );
+                    return Err(OzipError::ChecksumMismatch {
+                        item: item.filename.clone(),
+                        expected: item.sha256.clone(),
+                        calculated: digest_str,
+                    }
+                    .into());
                 }
             } else {
                 ChecksumStatus::NoHashInManifest

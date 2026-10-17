@@ -1397,4 +1397,109 @@ mod tests {
 
         let _ = std::fs::remove_file(&test_file);
     }
+
+    #[test]
+    fn test_ops_checksum_verification_and_io_error() {
+        let sbox = hex::decode(ops::SBOX_HEX).unwrap();
+        let item_data = vec![0x33u8; 8192];
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&item_data);
+        // Account for 0x1000 padding in ops
+        if item_data.len() % 0x1000 > 0 {
+            let pad = 0x1000 - (item_data.len() % 0x1000);
+            hasher.update(&vec![0u8; pad]);
+        }
+        let real_sha256 = format!("{:x}", hasher.finalize());
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "ops_chk_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let make_ops = |filename: &str, sha: &str, truncate: bool| -> std::path::PathBuf {
+            let path = tmp_dir.join(filename);
+            let mut container = Vec::new();
+            let enc_data = ops::key_custom_encrypt(&item_data, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+            let start = container.len() as u64;
+            if truncate {
+                container.extend(&enc_data[..enc_data.len() / 2]); // Truncated mid-partition
+            } else {
+                container.extend(enc_data);
+            }
+
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?><data><Sahara>\
+                 <File Path=\"test.img\" FileOffsetInSrc=\"{}\" SizeInByteInSrc=\"{}\" Sha256=\"{}\"/>\
+                 </Sahara></data>",
+                start / 0x200,
+                item_data.len(),
+                sha
+            );
+            let xml_bytes = xml.as_bytes();
+            let pad = (0x200 - (xml_bytes.len() % 0x200)) % 0x200;
+            let mut padded_xml_plain = xml_bytes.to_vec();
+            padded_xml_plain.resize(xml_bytes.len() + pad, 0u8);
+            let enc_xml =
+                ops::key_custom_encrypt(&padded_xml_plain, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+
+            let mut trailer = vec![0u8; 0x200];
+            trailer[0x18..0x1C].copy_from_slice(&(xml_bytes.len() as u32).to_le_bytes());
+
+            let mut ops_bytes = container;
+            ops_bytes.extend(enc_xml);
+            ops_bytes.extend(trailer);
+
+            std::fs::write(&path, &ops_bytes).unwrap();
+            path
+        };
+
+        // 1. Valid SHA256: passes with VerifiedFull
+        let valid_ops = make_ops("valid.ops", &real_sha256, false);
+        let out_valid = tmp_dir.join("out_valid");
+        let res1 = ops::extract_ops_with_reporter(&valid_ops, &out_valid, None, &NoopReporter);
+        assert!(res1.is_ok(), "Valid SHA-256 must succeed, got {:?}", res1);
+        let items = res1.unwrap();
+        assert_eq!(items[0].2, ChecksumStatus::VerifiedFull);
+
+        // 2. Corrupt SHA256 in manifest: fails with ChecksumMismatch (downcasted to OzipError)
+        let corrupt_ops = make_ops(
+            "corrupt.ops",
+            "badsha256hashbadsha256hashbadsha256hashbadsha256hashbadsha256hash",
+            false,
+        );
+        let out_corrupt = tmp_dir.join("out_corrupt");
+        let req = ozipdecrypt_core::extract::ExtractRequest {
+            input: corrupt_ops,
+            out_dir: out_corrupt,
+            partitions: None,
+        };
+        let res2 = ozipdecrypt_core::extract::extract(&req, &KeyConfig::default(), &NoopReporter);
+        assert!(
+            matches!(res2, Err(OzipError::ChecksumMismatch { .. })),
+            "Expected ChecksumMismatch error, got {:?}",
+            res2
+        );
+
+        // 3. Truncated container: fails with IO / unexpected EOF error, NOT ChecksumMismatch
+        let trunc_ops = make_ops("trunc.ops", &real_sha256, true);
+        let out_trunc = tmp_dir.join("out_trunc");
+        let req_trunc = ozipdecrypt_core::extract::ExtractRequest {
+            input: trunc_ops,
+            out_dir: out_trunc,
+            partitions: None,
+        };
+        let res3 =
+            ozipdecrypt_core::extract::extract(&req_trunc, &KeyConfig::default(), &NoopReporter);
+        assert!(
+            matches!(res3, Err(OzipError::Io(_)) | Err(OzipError::Truncated(_))),
+            "Expected Io / Truncated error for truncated file, got {:?}",
+            res3
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }
