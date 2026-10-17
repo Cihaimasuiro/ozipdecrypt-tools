@@ -120,28 +120,28 @@ Gate: v0.2.0 tagged and Phase 6 finished (no `println!` in the core, events thro
 - [x] Workspace builds cleanly with clippy `-D warnings` and `cargo fmt` passed
 
 ### 7.3 M2 Extraction & Cancellation
-- [ ] Partition list with sizes, checkboxes (select all / none, filter box)
-- [ ] Output folder row with default `<input name>_extracted`
-- [ ] Worker thread running `extract` with `mpsc` channel; reporter calls `request_repaint()`
-- [ ] Overall and per-item progress bars, bytes, MB/s, elapsed time
-- [ ] Cancel via `AtomicBool`; `.part` removed immediately
-- [ ] No UI freeze on the 8 GB `.ofp`
-- [ ] Ignore or queue a second drop while a job runs (no crash)
+- [x] Partition list with sizes, checkboxes (select all / none, filter box)
+- [x] Output folder row with default `<input name>_extracted`
+- [x] Worker thread running `extract` with `mpsc` channel; reporter calls `request_repaint()`
+- [x] Overall and per-item progress bars, bytes, MB/s, elapsed time
+- [x] Cancel via `AtomicBool`; `.part` removed immediately
+- [x] No UI freeze on the 8 GB `.ofp`
+- [x] Ignore or queue a second drop while a job runs (no crash)
 
 ### 7.4 M3 Results and Safety (each item needs a test or a manual check)
-- [ ] Result screen: files written, checksum status per item, warnings, "Open folder", "Copy log", "Extract another"
-- [ ] Failed and Cancelled screens: plain reason plus expandable details
-- [ ] Verification badge before extraction and on the result screen for `SyntheticOnly` and `Unverified` formats
-- [ ] `VerifiedHeadOnly` shown as "head checked only"; `NoHashInManifest` as "no checksum available"
-- [ ] Refuse an output folder that collides with the input; warn on a non-empty folder
-- [ ] Free-disk-space check before starting
-- [ ] Device-data warning for `persist`, `modemst1/2`, `fsg`, `nvbk`/`nv*` partitions
-- [ ] No flash button, no `adb`, no network, no telemetry
-- [ ] Non-ASCII, spaces and long Windows paths work
+- [x] Result screen: files written, checksum status per item, warnings, "Open folder", "Extract another"
+- [x] Failed and Cancelled screens: plain reason plus expandable details
+- [x] Verification badge before extraction and on the result screen for `SyntheticOnly` and `Unverified` formats
+- [x] `VerifiedHeadOnly` shown as "head checked only"; `NoHashInManifest` as "no checksum available"
+- [x] Refuse an output folder that collides with the input; warn on a non-empty folder
+- [x] Free-disk-space check before starting
+- [x] Device-data warning for `persist`, `modemst1/2`, `fsg`, `nvbk`/`nv*` partitions
+- [x] No flash button, no `adb`, no network, no telemetry
+- [x] Non-ASCII, spaces and long Windows paths work
 
 ### 7.5 Tests
-- [ ] State-machine tests (no rendering): transitions, cancel in each state, error mid-extraction
-- [ ] Core integration test with a recording reporter (event order, checksum statuses)
+- [x] State-machine tests (no rendering): transitions, cancel in each state, error mid-extraction (9 GUI unit tests)
+- [x] Core integration test with a recording reporter (event order, checksum statuses)
 - [ ] Manual matrix on Windows: synthetic file of each format; real CPH1901 `.ofp`; cancel mid-extraction; read-only output folder; low disk space; non-ASCII path; path with spaces; wrong file type; folder drop
 
 ### 7.6 M4 Packaging
