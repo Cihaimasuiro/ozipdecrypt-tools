@@ -44,6 +44,10 @@ pub mod ops;
 pub mod ozip;
 pub mod reporter;
 
+pub use crypto::KeyConfig;
+pub use detect::{
+    describe_container, describe_container_with_keys, detect_container, ContainerType,
+};
 pub use error::{OzipError, Result};
 pub use extract::{extract, ExtractItemSummary, ExtractRequest, ExtractSummary};
 pub use info::{ContainerInfo, PartitionMeta, VerificationLevel};

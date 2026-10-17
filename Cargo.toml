@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ozipdecrypt-core",
     "crates/ozipdecrypt-tools",
+    "crates/ozipdecrypt-gui",
 ]
 
 [workspace.package]
@@ -27,4 +28,6 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 quick-xml = { version = "0.36", features = ["serialize"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
+eframe = { version = "0.30", default-features = true }
+rfd = "0.15"
 ozipdecrypt-core = { path = "crates/ozipdecrypt-core" }

@@ -1,0 +1,16 @@
+[package]
+name = "ozipdecrypt-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ozipdecrypt-gui"
+path = "src/main.rs"
+
+[dependencies]
+ozipdecrypt-core = { workspace = true }
+eframe = { workspace = true }
+rfd = { workspace = true }

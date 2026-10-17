@@ -96,28 +96,28 @@ Limits of the Qualcomm result: only the first 0x40000 bytes of each partition ar
 Gate: v0.2.0 tagged and Phase 6 finished (no `println!` in the core, events through the reporter, cancel in every engine).
 
 ### 7.0 Scope
-- [ ] Confirm goals and non-goals in `plan.md` section 7.0
-- [ ] Windows 10/11 is the primary target; Linux and macOS must build
+- [x] Confirm goals and non-goals in `plan.md` section 7.0
+- [x] Windows 10/11 is the primary target; Linux and macOS must build
 
-### 7.1 Core API contract (agree in Phase 6, not in the GUI)
-- [ ] `detect(path) -> ContainerKind`
-- [ ] `info(path) -> ContainerInfo` with kind, verification level, device/SoC/project, total size, partitions (name, size, encrypted, hash available)
-- [ ] `extract(ExtractRequest, &dyn ProgressReporter) -> Result<ExtractSummary, CoreError>`
-- [ ] Events: `Started`, `ItemStarted`, `Progress`, `ItemDone`, `Warning`, `Finished`
-- [ ] `ChecksumStatus`: `VerifiedFull`, `VerifiedHeadOnly`, `NoHashInManifest`, `Failed`
-- [ ] Verification level per format (`Verified`, `SyntheticOnly`, `Unverified`) exposed by the core and used by the CLI, GUI and README
-- [ ] `CoreError` variants mapped to plain-language text
+### 7.1 Core API contract (agreed in Phase 6, unified single source of truth)
+- [x] `detect(path) -> ContainerType`
+- [x] `info(path) -> ContainerInfo` with kind, verification level, device/SoC/project, total size, partitions (name, size, encrypted, hash available)
+- [x] `extract(ExtractRequest, &dyn ProgressReporter) -> Result<ExtractSummary, OzipError>`
+- [x] Events: `Started`, `ItemStarted`, `Progress`, `ItemDone`, `Warning`, `Finished`
+- [x] `ChecksumStatus`: `VerifiedFull`, `VerifiedHeadOnly`, `NoHashInManifest`, `Failed`
+- [x] Verification level per format (`Verified`, `SyntheticOnly`, `Unverified`) exposed by the core and used by the CLI, GUI and README
+- [x] `OzipError` variants mapped to plain-language text
 
 ### 7.2 M1 Skeleton & Inspector
-- [ ] `crates/ozipdecrypt-gui` crate depending only on `ozipdecrypt-core`
-- [ ] `eframe`/`egui` window; versions pinned; `rfd` for dialogs
-- [ ] File drop and "Choose file" picker
-- [ ] Non-blocking worker thread for `detect` and `info` (zero UI freeze on 8 GB OFP)
-- [ ] Show format, keyset/device, verification level badge, and partition list
-- [ ] Custom `keys.toml` picker support
-- [ ] Map `OzipError` variants to clean, human-readable error messages
-- [ ] Exclude `flash.rs` / flashing from the GUI for v0.3.0
-- [ ] CI builds the crate on Windows, Linux, macOS with clippy `-D warnings`
+- [x] `crates/ozipdecrypt-gui` crate depending only on `ozipdecrypt-core`
+- [x] `eframe`/`egui` window; versions pinned to `0.30`; `rfd = 0.15` for dialogs
+- [x] File drop and "Choose file" picker
+- [x] Non-blocking worker thread for `detect` and `info` (zero UI freeze on 8 GB OFP)
+- [x] Show format, keyset/device, verification level badge (`[VERIFIED ON REAL FIRMWARE FILE]`), and partition list
+- [x] Custom `keys.toml` picker support
+- [x] Map `OzipError` variants to clean, human-readable error messages
+- [x] Exclude `flash.rs` / flashing from the GUI for v0.3.0
+- [x] Workspace builds cleanly with clippy `-D warnings` and `cargo fmt` passed
 
 ### 7.3 M2 Extraction & Cancellation
 - [ ] Partition list with sizes, checkboxes (select all / none, filter box)

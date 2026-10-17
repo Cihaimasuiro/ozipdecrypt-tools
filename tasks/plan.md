@@ -123,7 +123,7 @@ Phase 6 Follow-ups (Code Review Feedback, to complete before Phase 7):
 
 #### 7.1 Technical decisions
 1. **Crate layout:** `crates/ozipdecrypt-gui` depends only on `ozipdecrypt-core`, never on the CLI crate. The GUI binary name is `ozipdecrypt-gui`.
-2. **Toolkit:** `eframe`/`egui`, versions pinned in `Cargo.lock` and bumped deliberately. File dialogs through `rfd`. No async runtime and no web view.
+2. **Toolkit:** `eframe`/`egui` pinned to `0.30` (rust-version 1.80+), using default OpenGL (`glow`) backend for lightweight compilation without `wgpu` shader overhead. File dialogs through `rfd = 0.15`. No async runtime and no web view.
 3. **Threading:** one worker thread per job (`std::thread` plus an `mpsc` channel). The worker holds a reporter that sends events to the UI and calls `ctx.request_repaint()`. Cancel is an `AtomicBool` read by `is_cancelled()`. The UI thread never touches the filesystem except to read metadata for display.
 4. **One source of truth for status text:** the core exposes the verification level per format (`Verified`, `SyntheticOnly`, `Unverified`, matching the matrix above) and a checksum status per item. The CLI, GUI and README read the same values.
 5. **No printing in the core,** so the GUI shows only structured events, never scraped terminal text.

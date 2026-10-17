@@ -202,6 +202,13 @@ fn check_mtk_patterns(trailer: &[u8]) -> bool {
 }
 
 pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
+    describe_container_with_keys(path, &crate::crypto::KeyConfig::default())
+}
+
+pub fn describe_container_with_keys(
+    path: &Path,
+    keys: &crate::crypto::KeyConfig,
+) -> Result<ContainerInfo> {
     let container_type = detect_container(path)?;
     let metadata = path
         .metadata()
@@ -261,10 +268,9 @@ pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
         }
     } else if container_type == ContainerType::OfpQualcomm {
         if let Ok(mut f) = File::open(path) {
-            let keys = crate::crypto::KeyConfig::default();
             if let Ok(page_size) = crate::ofp::detect_page_size(&mut f, file_size) {
                 if let Ok((_triplet, _k, _iv, xml_bytes)) =
-                    crate::ofp::find_and_decrypt_xml(&mut f, file_size, page_size, &keys)
+                    crate::ofp::find_and_decrypt_xml(&mut f, file_size, page_size, keys)
                 {
                     let xml_str = String::from_utf8_lossy(&xml_bytes);
                     if let Ok(items) = crate::ofp::parse_profile_xml(&xml_str, page_size) {
