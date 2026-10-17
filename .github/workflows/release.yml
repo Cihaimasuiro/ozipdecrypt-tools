@@ -171,6 +171,15 @@ jobs:
           sha256sum ozipdecrypt-* > SHA256SUMS
           cat SHA256SUMS
 
+      - name: Check for partial release status
+        working-directory: dist
+        run: |
+          if [ "${{ needs.build-release.result }}" != "success" ]; then
+            echo -e "\n\n> [!WARNING]\n> **Partial Release**: One or more platform matrix builds failed. Check workflow logs for details." >> partial_notice.md
+          else
+            touch partial_notice.md
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -178,4 +187,8 @@ jobs:
           files: |
             dist/ozipdecrypt-*
             dist/SHA256SUMS
+          body_path: dist/partial_notice.md
+          append_body: true
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') || (github.event_name == 'workflow_dispatch' && contains(inputs.tag_name, '-')) }}
+          make_latest: ${{ (contains(github.ref_name, '-') || (github.event_name == 'workflow_dispatch' && contains(inputs.tag_name, '-'))) && 'false' || 'true' }}
