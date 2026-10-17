@@ -764,27 +764,36 @@ impl eframe::App for OzipGuiApp {
                         match info.verification_level {
                             VerificationLevel::Verified => {
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(80, 200, 120),
-                                    "[VERIFIED ON REAL FIRMWARE FILE]",
+                                    crate::theme::OK,
+                                    "Verified on a real firmware file",
                                 );
                             }
                             VerificationLevel::SyntheticOnly => {
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(230, 160, 50),
-                                    "[SYNTHETIC TESTED ONLY]",
+                                    crate::theme::WARN,
+                                    "Synthetic tests only",
                                 );
                             }
                             VerificationLevel::Unverified => {
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(200, 70, 70),
-                                    "[UNVERIFIED]",
+                                    crate::theme::BAD,
+                                    "Unverified",
                                 );
                             }
                         }
                     });
                 });
 
-                ui.separator();
+                ui.add_space(4.0);
+                {
+                    let strip: Vec<(&str, u64, bool)> = info
+                        .partitions
+                        .iter()
+                        .map(|p| (p.name.as_str(), p.size, selected_partitions.contains(&p.name)))
+                        .collect();
+                    crate::theme::partition_strip(ui, &strip);
+                }
+                ui.add_space(4.0);
 
                 // Output Folder Selection Row
                 ui.horizontal(|ui| {
@@ -805,7 +814,7 @@ impl eframe::App for OzipGuiApp {
                 }
 
                 if let Some(w) = disk_warning {
-                    ui.colored_label(egui::Color32::from_rgb(230, 160, 50), w);
+                    ui.colored_label(crate::theme::WARN, w);
                 }
 
                 // Device-specific partition safety warning
@@ -816,7 +825,7 @@ impl eframe::App for OzipGuiApp {
                 if !dangerous.is_empty() {
                     ui.group(|ui| {
                         ui.colored_label(
-                            egui::Color32::from_rgb(230, 160, 50),
+                            crate::theme::WARN,
                             format!(
                                 "⚠ Notice: Device-specific data partition(s) selected: {}. Never flash a factory copy onto a phone.",
                                 dangerous.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
@@ -1001,7 +1010,7 @@ impl eframe::App for OzipGuiApp {
                     ui.horizontal(|ui| {
                         if *cancelling {
                             ui.colored_label(
-                                egui::Color32::from_rgb(230, 160, 50),
+                                crate::theme::WARN,
                                 "Cancelling... waiting for chunk to stop and clean up partial file",
                             );
                         } else if ui
@@ -1026,7 +1035,7 @@ impl eframe::App for OzipGuiApp {
             } => {
                 ui.vertical(|ui| {
                     ui.colored_label(
-                        egui::Color32::from_rgb(80, 200, 120),
+                        crate::theme::OK,
                         egui::RichText::new("✓ Extraction Complete").size(20.0).strong(),
                     );
                     ui.add_space(5.0);
@@ -1044,7 +1053,7 @@ impl eframe::App for OzipGuiApp {
                         ui.add_space(5.0);
                         ui.group(|ui| {
                             ui.colored_label(
-                                egui::Color32::from_rgb(230, 160, 50),
+                                crate::theme::WARN,
                                 egui::RichText::new("Warnings:").strong(),
                             );
                             for w in warnings {
@@ -1076,13 +1085,13 @@ impl eframe::App for OzipGuiApp {
                                         match item.checksum {
                                             ChecksumStatus::VerifiedFull => {
                                                 ui.colored_label(
-                                                    egui::Color32::from_rgb(80, 200, 120),
+                                                    crate::theme::OK,
                                                     "[Verified full]",
                                                 );
                                             }
                                             ChecksumStatus::VerifiedHeadOnly => {
                                                 ui.colored_label(
-                                                    egui::Color32::from_rgb(230, 160, 50),
+                                                    crate::theme::WARN,
                                                     "[Head checked only]",
                                                 );
                                             }
@@ -1120,7 +1129,7 @@ impl eframe::App for OzipGuiApp {
                 ui.vertical_centered(|ui| {
                     ui.add_space(50.0);
                     ui.colored_label(
-                        egui::Color32::from_rgb(230, 160, 50),
+                        crate::theme::WARN,
                         egui::RichText::new("Extraction Cancelled").size(20.0).strong(),
                     );
                     ui.add_space(10.0);
