@@ -127,7 +127,7 @@ pub fn extract_ofp_partition(
     Ok(())
 }
 
-fn detect_page_size(file: &mut File, file_size: u64) -> Result<u64> {
+pub(crate) fn detect_page_size(file: &mut File, file_size: u64) -> Result<u64> {
     for &candidate in &[0x200u64, 0x1000u64] {
         if file_size > candidate {
             file.seek(SeekFrom::Start(file_size - candidate + 0x10))?;
@@ -143,7 +143,7 @@ fn detect_page_size(file: &mut File, file_size: u64) -> Result<u64> {
 }
 
 #[allow(clippy::type_complexity)]
-fn find_and_decrypt_xml(
+pub(crate) fn find_and_decrypt_xml(
     file: &mut File,
     file_size: u64,
     page_size: u64,
@@ -466,7 +466,22 @@ fn verify_checksums(
         }
     }
 
-    if !md5_verified || !sha256_verified {
+    let md5_bad = !md5_sum.is_empty() && !md5_verified;
+    let sha256_bad = !sha256_sum.is_empty() && !sha256_verified;
+    let has_md5 = !md5_sum.is_empty();
+    let has_sha256 = !sha256_sum.is_empty();
+
+    let is_failure = if has_md5 && has_sha256 {
+        md5_bad && sha256_bad
+    } else if has_md5 {
+        md5_bad
+    } else if has_sha256 {
+        sha256_bad
+    } else {
+        false
+    };
+
+    if is_failure {
         bail!(
             "{}: Checksum verification failed! (md5_ok: {}, sha256_ok: {})",
             mode_str,
@@ -474,7 +489,12 @@ fn verify_checksums(
             sha256_verified
         );
     } else {
-        println!("  [+] {}: Verified checksums successfully.", mode_str);
+        let status = if has_md5 && has_sha256 && (md5_bad || sha256_bad) {
+            format!("(md5_ok: {}, sha256_ok: {})", md5_verified, sha256_verified)
+        } else {
+            "successfully".to_string()
+        };
+        println!("  [+] {}: Verified checksums {}.", mode_str, status);
     }
 
     Ok(())

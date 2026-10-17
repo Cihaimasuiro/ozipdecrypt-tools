@@ -415,6 +415,11 @@ fn handle_info(input: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::manual_is_multiple_of,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::needless_range_loop
+)]
 mod tests {
     use super::*;
     use aes::cipher::{BlockEncrypt, KeyInit};
@@ -1197,5 +1202,29 @@ mod tests {
         assert!(ops::extract_ops(&corrupt_file, &out_dir, None).is_err());
 
         let _ = std::fs::remove_file(&corrupt_file);
+    }
+
+    #[test]
+    fn test_cancel_or_error_leaves_no_part_file() {
+        let tmp_dir = std::env::temp_dir();
+        let bad_ozip = tmp_dir.join("test_bad.ozip");
+        let out_zip = tmp_dir.join("test_output_clean.zip");
+        let part_file = tmp_dir.join("test_output_clean.zip.part");
+
+        let mut data = vec![0u8; 0x2000];
+        data[0..12].copy_from_slice(b"OPPOENCRYPT!");
+        std::fs::write(&bad_ozip, &data).unwrap();
+
+        let keys = crypto::KeyConfig::default();
+        let res = ozip::decrypt_ozip(&bad_ozip, &out_zip, &keys);
+        assert!(res.is_err(), "Extraction on bad file must fail");
+
+        assert!(!out_zip.exists(), "Target file must not exist on failure");
+        assert!(
+            !part_file.exists(),
+            "Staging .part file must be cleaned up on failure"
+        );
+
+        let _ = std::fs::remove_file(&bad_ozip);
     }
 }

@@ -243,6 +243,61 @@ pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
                 }
             }
         }
+    } else if container_type == ContainerType::OfpQualcomm {
+        if let Ok(mut f) = File::open(path) {
+            let keys = crate::crypto::KeyConfig::default();
+            if let Ok(page_size) = crate::ofp::detect_page_size(&mut f, file_size) {
+                if let Ok((_triplet, _k, _iv, xml_bytes)) =
+                    crate::ofp::find_and_decrypt_xml(&mut f, file_size, page_size, &keys)
+                {
+                    let xml_str = String::from_utf8_lossy(&xml_bytes);
+                    if let Ok(items) = crate::ofp::parse_profile_xml(&xml_str, page_size) {
+                        for item in items {
+                            partitions.push(PartitionMeta {
+                                name: item.filename,
+                                size: item.rlength,
+                                is_encrypted: !item.is_copy_only,
+                                checksum: if !item.sha256.is_empty() {
+                                    Some(item.sha256)
+                                } else if !item.md5.is_empty() {
+                                    Some(item.md5)
+                                } else {
+                                    None
+                                },
+                            });
+                        }
+                    }
+                    if let Some(pos) = xml_str.find("Project=\"") {
+                        let sub = &xml_str[pos + 9..];
+                        if let Some(end) = sub.find('"') {
+                            let prj = &sub[..end];
+                            chipset = Some(format!("Qualcomm Snapdragon (Project: {})", prj));
+                        }
+                    }
+                }
+            }
+        }
+    } else if container_type == ContainerType::OnePlusOps {
+        if let Ok(mut f) = File::open(path) {
+            if let Ok(sbox) = hex::decode(crate::ops::SBOX_HEX) {
+                if let Ok((xml_str, _)) = crate::ops::extract_ops_xml(&mut f, file_size, &sbox) {
+                    if let Ok(items) = crate::ops::parse_ops_xml(&xml_str) {
+                        for item in items {
+                            partitions.push(PartitionMeta {
+                                name: item.filename,
+                                size: item.length,
+                                is_encrypted: item.is_encrypted,
+                                checksum: if !item.sha256.is_empty() {
+                                    Some(item.sha256)
+                                } else {
+                                    None
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+        }
     } else if container_type == ContainerType::OfpMediaTek && file_size > 0x6C {
         if let Ok(mut f) = File::open(path) {
             if f.seek(SeekFrom::Start(file_size - 0x6C)).is_ok() {

@@ -387,7 +387,7 @@ pub fn extract_ops(ops_path: &Path, out_dir: &Path, target_partition: Option<&st
 }
 
 #[allow(clippy::manual_is_multiple_of)]
-fn extract_ops_xml(
+pub(crate) fn extract_ops_xml(
     file: &mut File,
     file_size: u64,
     sbox: &[u8],
