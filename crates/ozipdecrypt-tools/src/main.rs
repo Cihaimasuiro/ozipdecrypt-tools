@@ -608,6 +608,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires 5 GB local sample"]
     fn test_inspect_real_sample_timing() {
         let sample = Path::new("samples/CPH1901EX_11_A.22_210306_072baf86.zip");
         if !sample.exists() {
