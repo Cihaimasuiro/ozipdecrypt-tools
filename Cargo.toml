@@ -15,7 +15,7 @@ repository = "https://github.com/Cihaimasuiro/ozipdecrypt-tools"
 exclude = ["tools/", "tasks/", "source-code/", "samples/"]
 
 [workspace.dependencies]
-thiserror = "1.0"
+thiserror = "2.0"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 aes = "0.8"
