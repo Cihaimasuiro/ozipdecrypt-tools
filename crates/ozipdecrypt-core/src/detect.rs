@@ -44,7 +44,16 @@ pub fn detect_container(path: &Path) -> Result<ContainerType> {
         return Ok(ContainerType::Ozip);
     }
 
-    // 2. Strict Check for Qualcomm OFP Container (Signature 0x7CEF / 0xCEF7 in trailer)
+    // 2. Check for Standard ZIP / OZIP Mode 1 or 2 (starts with PK\x03\x04)
+    if &head16[0..4] == b"PK\x03\x04" {
+        if is_zip_ozip(&mut file)? {
+            return Ok(ContainerType::Ozip);
+        } else {
+            return Ok(ContainerType::StandardZip);
+        }
+    }
+
+    // 3. Strict Check for Qualcomm OFP Container (Signature 0x7CEF / 0xCEF7 in trailer)
     for &page_size in &[0x1000u64, 0x200u64] {
         if file_size > page_size {
             file.seek(SeekFrom::End(-(page_size as i64)))?;
@@ -58,7 +67,7 @@ pub fn detect_container(path: &Path) -> Result<ContainerType> {
         }
     }
 
-    // 3. Strict Check for MediaTek OFP Container (Trailer at filesize - 0x6C decrypted with 'geyixue')
+    // 4. Strict Check for MediaTek OFP Container (Trailer at filesize - 0x6C decrypted with 'geyixue')
     if file_size > 0x6C {
         file.seek(SeekFrom::End(-0x6C))?;
         let mut mtk_trailer = [0u8; 0x6C];
@@ -70,7 +79,7 @@ pub fn detect_container(path: &Path) -> Result<ContainerType> {
         }
     }
 
-    // 4. Strict Check for OnePlus OPS Container (Trailer at filesize - 0x200)
+    // 5. Strict Check for OnePlus OPS Container (Trailer at filesize - 0x200)
     if file_size > 0x200 {
         file.seek(SeekFrom::End(-0x200))?;
         let mut ops_tail = [0u8; 0x200];
@@ -79,16 +88,6 @@ pub fn detect_container(path: &Path) -> Result<ContainerType> {
             if magic == 0x9EE3B5D1 || check_ops_manifest(&mut file, file_size, &ops_tail) {
                 return Ok(ContainerType::OnePlusOps);
             }
-        }
-    }
-
-    // 5. Check for Standard ZIP / OZIP Mode 1 or 2
-    if &head16[0..4] == b"PK\x03\x04" {
-        // Inspect ZIP structure for OZIP markers
-        if is_zip_ozip(&mut file)? {
-            return Ok(ContainerType::Ozip);
-        } else {
-            return Ok(ContainerType::StandardZip);
         }
     }
 
@@ -111,21 +110,21 @@ pub fn detect_container(path: &Path) -> Result<ContainerType> {
 
 fn is_zip_ozip(file: &mut File) -> Result<bool> {
     file.seek(SeekFrom::Start(0))?;
-    let mut zip = match zip::ZipArchive::new(file) {
+    let mut zip = match zip::ZipArchive::new(std::io::BufReader::new(file)) {
         Ok(z) => z,
         Err(_) => return Ok(false),
     };
 
+    // Mode 1 OZIP marker
     if zip.by_name("oppo_metadata").is_ok() {
         return Ok(true);
     }
 
-    for i in 0..zip.len() {
-        if let Ok(mut zfile) = zip.by_index(i) {
-            let mut header = [0u8; 12];
-            if zfile.read_exact(&mut header).is_ok() && &header == b"OPPOENCRYPT!" {
-                return Ok(true);
-            }
+    // Mode 2 OZIP marker
+    if let Ok(mut boot) = zip.by_name("boot.img") {
+        let mut header = [0u8; 12];
+        if boot.read_exact(&mut header).is_ok() && &header == b"OPPOENCRYPT!" {
+            return Ok(true);
         }
     }
 

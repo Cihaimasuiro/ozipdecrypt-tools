@@ -547,6 +547,29 @@ mod tests {
     }
 
     #[test]
+    fn test_inspect_real_sample_timing() {
+        let sample = Path::new("samples/CPH1901EX_11_A.22_210306_072baf86.zip");
+        if !sample.exists() {
+            return;
+        }
+        println!("[DEBUG TEST] Starting detection on {}", sample.display());
+        let t0 = std::time::Instant::now();
+        let ct = detect::detect_container(sample).unwrap();
+        println!(
+            "[DEBUG TEST] detect_container took {:?}, got {:?}",
+            t0.elapsed(),
+            ct
+        );
+        let t1 = std::time::Instant::now();
+        let info = detect::describe_container(sample).unwrap();
+        println!(
+            "[DEBUG TEST] describe_container took {:?}, got {} partitions",
+            t1.elapsed(),
+            info.partitions.len()
+        );
+    }
+
+    #[test]
     fn test_ozip_selective_partition_extraction() {
         use std::fs::File;
         use std::io::Write;
