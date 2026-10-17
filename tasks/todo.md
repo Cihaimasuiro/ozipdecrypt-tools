@@ -1,6 +1,6 @@
 # Task Checklist: ozipdecrypt-tools
 
-Status: v0.2.0 in the manifests, not tagged. Workspace (`ozipdecrypt-core` + `ozipdecrypt-tools`). 29 unit tests (one `#[ignore]`). CI green on Windows, Linux, and macOS.
+Status: v0.3.0 in the manifests (bumped and Cargo.lock synced). Workspace (`ozipdecrypt-core` + `ozipdecrypt-tools` + `ozipdecrypt-gui`). 44 active unit tests (one `#[ignore]`). CI green on Windows, Linux, and macOS.
 
 ## Verification Matrix
 | Format | Real firmware file |
