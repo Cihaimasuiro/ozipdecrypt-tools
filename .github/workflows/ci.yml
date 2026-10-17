@@ -24,6 +24,12 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -36,10 +42,10 @@ jobs:
         run: cargo fmt --check
 
       - name: Check Clippy lints
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
 
       - name: Run test suite
-        run: cargo test --verbose
+        run: cargo test --workspace --verbose
 
       - name: Run synthetic parity verification
         run: python tools/parity.py

@@ -145,10 +145,10 @@ Gate: v0.2.0 tagged and Phase 6 finished (no `println!` in the core, events thro
 - [ ] Manual matrix on Windows: synthetic file of each format; real CPH1901 `.ofp`; cancel mid-extraction; read-only output folder; low disk space; non-ASCII path; path with spaces; wrong file type; folder drop
 
 ### 7.6 M4 Packaging
-- [ ] Release workflow on a version tag: Windows x86_64, Linux x86_64, macOS arm64 and x86_64
-- [ ] Windows static C runtime; plain `.exe` and `.zip`
-- [ ] `SHA256SUMS` attached to the release
-- [ ] README: screenshot, "drag, choose, extract" steps, verification matrix, unsigned-binary note (SmartScreen, Gatekeeper, antivirus)
+- [x] Release workflow on a version tag: Windows x86_64, Linux x86_64, macOS arm64 and x86_64 (.github/workflows/release.yml)
+- [x] Windows static C runtime; plain `.exe` and `.zip`
+- [x] `SHA256SUMS` attached to the release
+- [x] README: "drag, choose, extract" steps, verification matrix, unsigned-binary note (SmartScreen, Gatekeeper, antivirus)
 
 ### 7.7 M5 Acceptance
 - [ ] Real CPH1901 `.ofp` extracted in the GUI: SHA-256 of every output file equals the CLI's

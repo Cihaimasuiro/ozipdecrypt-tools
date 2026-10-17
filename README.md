@@ -18,15 +18,33 @@ Unified high-performance Rust CLI for decrypting Oppo, OnePlus, and Realme firmw
 
 ---
 
+## Desktop GUI (`ozipdecrypt-gui`)
+
+In addition to the command-line interface, `ozipdecrypt-tools` includes a fast, native desktop GUI:
+
+1. **Drag & Drop**: Drag your firmware file (`.ozip`, `.ofp`, `.ops`, or `.zip`) directly into the window (or click **Choose Firmware File...**).
+2. **Inspect & Select**: View container details, SoC/platform, and verification badge. Filter partitions and pick individual items or **Select All**. Set your destination folder (defaults to `<input_name>_extracted`).
+3. **Extract & Cancel**: Click **Extract Selected**. Monitor real-time progress, throughput, and elapsed time. Cancel at any point to stop safely and remove partial `.part` files automatically.
+
+> [!NOTE]
+> **Unsigned Binaries & Antivirus False Positives**:
+> Release binaries are currently self-built and unsigned. Windows SmartScreen and macOS Gatekeeper will display a warning on first run, and heuristic antivirus engines may flag firmware decryption utilities. You can safely bypass SmartScreen via *More info -> Run anyway* or inspect/build the full source yourself with `cargo build --release`.
+
+---
+
 ## Installation & Build
 
-Prerequisites: [Rust Toolchain](https://rustup.rs/) (1.70+)
+Prerequisites: [Rust Toolchain](https://rustup.rs/) (1.80+)
 
 ```bash
-cargo build --release
+# Build both CLI and GUI:
+cargo build --release --workspace
+
+# Or run the GUI directly:
+cargo run --release -p ozipdecrypt-gui
 ```
 
-The optimized binary will be compiled to `target/release/ozipdecrypt-tools` (or `ozipdecrypt-tools.exe` on Windows).
+The optimized binaries will be compiled to `target/release/ozipdecrypt-gui` and `target/release/ozipdecrypt-tools` (or `.exe` on Windows).
 
 ---
 
@@ -150,9 +168,9 @@ Run the automated constants audit diffing against upstream Python modules:
 python tools/check_constants.py
 ```
 
-Run the built-in test suite (29 active unit tests + 1 doc-test):
+Run the built-in test suite (44 active unit tests + 1 doc-test):
 ```bash
-cargo test
+cargo test --workspace
 ```
 
 Run cross-platform synthetic parity verification:
