@@ -17,6 +17,8 @@ import shutil
 import hashlib
 import tempfile
 import subprocess
+import time
+import zipfile
 from pathlib import Path
 
 def find_rust_binary(root: Path) -> Path:
@@ -141,6 +143,143 @@ def verify_ops_synthetic(root: Path, rust_bin: Path, work_dir: Path) -> bool:
     print("[SUCCESS] All OPS synthetic partitions extracted with 100% SHA-256 bit-for-bit parity!")
     return True
 
+def verify_real_ozip_parity(target_file: Path, root: Path, rust_bin: Path, work_dir: Path) -> bool:
+    print("\n" + "=" * 65)
+    print(f"  Verifying Real OZIP Parity: {target_file.name}")
+    print("=" * 65)
+
+    py_dir = work_dir / "py_ozip"
+    py_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Run Python ozipdecrypt.py
+    print("[*] Running upstream Python ozipdecrypt.py...")
+    py_target_copy = py_dir / target_file.name
+    shutil.copyfile(target_file, py_target_copy)
+
+    t0_py = time.time()
+    res_py = subprocess.run(
+        [sys.executable, str(root / "tools" / "reference" / "ozipdecrypt.py"), str(py_target_copy)],
+        cwd=py_dir,
+        capture_output=True,
+        text=True,
+    )
+    t1_py = time.time()
+
+    if res_py.returncode != 0:
+        print(f"[FAIL] Upstream Python ozipdecrypt failed:\n{res_py.stderr}\n{res_py.stdout}")
+        return False
+
+    py_zip = py_dir / (target_file.stem + ".zip")
+    if not py_zip.exists():
+        print(f"[FAIL] Python ozipdecrypt did not create expected output: {py_zip}")
+        return False
+    print(f"[+] Python decryption finished in {t1_py - t0_py:.2f}s (output: {py_zip.stat().st_size:,} bytes)")
+
+    # 2. Run Rust CLI
+    rust_dir = work_dir / "rust_ozip"
+    rust_dir.mkdir(parents=True, exist_ok=True)
+    rust_zip = rust_dir / "out.zip"
+
+    print("[*] Running native Rust CLI ozipdecrypt-tools...")
+    t0_rust = time.time()
+    res_rust = subprocess.run(
+        [str(rust_bin), "ozip", str(target_file), "-o", str(rust_zip)],
+        capture_output=True,
+        text=True,
+    )
+    t1_rust = time.time()
+
+    if res_rust.returncode != 0:
+        print(f"[FAIL] Rust ozip decryption failed:\n{res_rust.stderr}\n{res_rust.stdout}")
+        return False
+
+    if not rust_zip.exists():
+        print(f"[FAIL] Rust ozip did not produce expected output: {rust_zip}")
+        return False
+    print(f"[+] Rust decryption finished in {t1_rust - t0_rust:.2f}s (output: {rust_zip.stat().st_size:,} bytes)")
+
+    # 3. Compare entries inside both zip archives
+    print("\n[*] Comparing decrypted files inside ZIP archives...")
+    with zipfile.ZipFile(py_zip, "r") as z_py, zipfile.ZipFile(rust_zip, "r") as z_rust:
+        py_names = sorted(z_py.namelist())
+        rust_names = sorted(z_rust.namelist())
+
+        if py_names != rust_names:
+            print("[FAIL] ZIP entry list mismatch!")
+            print(f"  Python entries ({len(py_names)}): {py_names[:10]}...")
+            print(f"  Rust entries   ({len(rust_names)}): {rust_names[:10]}...")
+            return False
+
+        all_matched = True
+        total_bytes = 0
+        for name in py_names:
+            py_bytes = z_py.read(name)
+            rust_bytes = z_rust.read(name)
+            total_bytes += len(rust_bytes)
+
+            h_py = hashlib.sha256(py_bytes).hexdigest()
+            h_rust = hashlib.sha256(rust_bytes).hexdigest()
+
+            if h_py == h_rust:
+                print(f"  [OK] {name:<35} ({len(rust_bytes):>10,} bytes) SHA-256: {h_rust}")
+            else:
+                print(f"  [FAIL] {name:<35} MISMATCH!")
+                print(f"         Python SHA-256: {h_py}")
+                print(f"         Rust   SHA-256: {h_rust}")
+                all_matched = False
+
+    if all_matched:
+        print("\n" + "=" * 65)
+        print(f"[SUCCESS] 100% BIT-FOR-BIT SHA-256 PARITY VERIFIED ACROSS ALL {len(py_names)} ENTRIES!")
+        print(f"Total uncompressed data: {total_bytes:,} bytes")
+        speedup = (t1_py - t0_py) / max(0.001, t1_rust - t0_rust)
+        print(f"Speedup: {speedup:.1f}x faster in Rust ({t1_rust - t0_rust:.2f}s vs {t1_py - t0_py:.2f}s)")
+        print("=" * 65)
+        return True
+    else:
+        print("\n[FAIL] One or more entries failed bit-for-bit SHA-256 parity verification!")
+        return False
+
+def verify_real_extracted_dir_parity(py_dir: Path, rust_dir: Path) -> bool:
+    print("\n[*] Comparing extracted partition files...")
+    py_files = sorted([p.relative_to(py_dir) for p in py_dir.rglob("*") if p.is_file()])
+    rust_files = sorted([p.relative_to(rust_dir) for p in rust_dir.rglob("*") if p.is_file()])
+
+    if py_files != rust_files:
+        print("[FAIL] Extracted file list mismatch!")
+        print(f"  Python files ({len(py_files)}): {py_files[:10]}...")
+        print(f"  Rust files   ({len(rust_files)}): {rust_files[:10]}...")
+        return False
+
+    all_matched = True
+    total_bytes = 0
+    for rel_path in py_files:
+        f_py = py_dir / rel_path
+        f_rust = rust_dir / rel_path
+        size = f_rust.stat().st_size
+        total_bytes += size
+
+        h_py = sha256_file(f_py)
+        h_rust = sha256_file(f_rust)
+
+        if h_py == h_rust:
+            print(f"  [OK] {str(rel_path):<35} ({size:>10,} bytes) SHA-256: {h_rust}")
+        else:
+            print(f"  [FAIL] {str(rel_path):<35} MISMATCH!")
+            print(f"         Python SHA-256: {h_py}")
+            print(f"         Rust   SHA-256: {h_rust}")
+            all_matched = False
+
+    if all_matched:
+        print("\n" + "=" * 65)
+        print(f"[SUCCESS] 100% BIT-FOR-BIT SHA-256 PARITY VERIFIED ACROSS ALL {len(py_files)} FILES!")
+        print(f"Total extracted data: {total_bytes:,} bytes")
+        print("=" * 65)
+        return True
+    else:
+        print("\n[FAIL] One or more files failed bit-for-bit SHA-256 parity verification!")
+        return False
+
 def main():
     root = Path(__file__).resolve().parent.parent
     rust_bin = find_rust_binary(root)
@@ -150,12 +289,62 @@ def main():
     try:
         if len(sys.argv) > 1 and not sys.argv[1].startswith("--"):
             target_file = Path(sys.argv[1]).resolve()
-            print(f"[*] Verifying real target file: {target_file}")
-            # Real file verification
-            out_dir = root / "extracted_parity"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            res = subprocess.run([str(rust_bin), "extract", str(target_file), "--out-dir", str(out_dir)])
-            sys.exit(res.returncode)
+            if not target_file.is_file():
+                print(f"[FAIL] Target file does not exist: {target_file}")
+                sys.exit(1)
+
+            ext = target_file.suffix.lower()
+            if ext == ".ozip":
+                success = verify_real_ozip_parity(target_file, root, rust_bin, temp_dir)
+            elif ext == ".ofp":
+                rust_dir = temp_dir / "rust_ofp"
+                py_dir = temp_dir / "py_ofp"
+                rust_dir.mkdir(parents=True, exist_ok=True)
+                py_dir.mkdir(parents=True, exist_ok=True)
+
+                print(f"[*] Extracting with Rust CLI: {rust_bin}")
+                res_rust = subprocess.run([str(rust_bin), "ofp", str(target_file), "--out-dir", str(rust_dir)], capture_output=True, text=True)
+                if res_rust.returncode != 0:
+                    print(f"[FAIL] Rust ofp extraction failed:\n{res_rust.stderr}\n{res_rust.stdout}")
+                    sys.exit(1)
+
+                print("[*] Extracting with upstream Python OFP tool...")
+                res_py = subprocess.run([sys.executable, str(root / "tools" / "reference" / "ofp_qc_decrypt.py"), str(target_file), str(py_dir)], capture_output=True, text=True)
+                if res_py.returncode != 0 or not any(py_dir.iterdir()):
+                    print("[*] Trying MediaTek OFP decryptor...")
+                    shutil.rmtree(py_dir, ignore_errors=True)
+                    py_dir.mkdir(parents=True, exist_ok=True)
+                    res_py = subprocess.run([sys.executable, str(root / "tools" / "reference" / "ofp_mtk_decrypt.py"), str(target_file), str(py_dir)], capture_output=True, text=True)
+
+                if res_py.returncode != 0:
+                    print(f"[FAIL] Upstream Python OFP decrypt failed:\n{res_py.stderr}\n{res_py.stdout}")
+                    sys.exit(1)
+
+                success = verify_real_extracted_dir_parity(py_dir, rust_dir)
+            elif ext == ".ops":
+                rust_dir = temp_dir / "rust_ops"
+                py_dir = temp_dir / "py_ops"
+                rust_dir.mkdir(parents=True, exist_ok=True)
+                py_dir.mkdir(parents=True, exist_ok=True)
+
+                print(f"[*] Extracting with Rust CLI: {rust_bin}")
+                res_rust = subprocess.run([str(rust_bin), "ops", str(target_file), "--out-dir", str(rust_dir)], capture_output=True, text=True)
+                if res_rust.returncode != 0:
+                    print(f"[FAIL] Rust ops extraction failed:\n{res_rust.stderr}\n{res_rust.stdout}")
+                    sys.exit(1)
+
+                print("[*] Extracting with upstream Python opscrypto.py...")
+                res_py = subprocess.run([sys.executable, str(root / "tools" / "reference" / "opscrypto.py"), "decrypt", str(target_file), f"--extractdir={str(py_dir)}"], cwd=temp_dir, capture_output=True, text=True)
+                if res_py.returncode != 0:
+                    print(f"[FAIL] Upstream Python opscrypto failed:\n{res_py.stderr}\n{res_py.stdout}")
+                    sys.exit(1)
+
+                success = verify_real_extracted_dir_parity(py_dir, rust_dir)
+            else:
+                print(f"[FAIL] Unsupported container extension for parity testing: {ext}")
+                sys.exit(1)
+
+            sys.exit(0 if success else 1)
         else:
             success = verify_ops_synthetic(root, rust_bin, temp_dir)
             sys.exit(0 if success else 1)
