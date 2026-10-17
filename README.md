@@ -121,16 +121,43 @@ ivec = "00000000000000000000000000000000"
 
 ---
 
-## Automated Tests & Verification
+## Verification Matrix
+
+The project enforces strict separation between algorithms verified on real firmware data vs. synthetic test fixtures:
+
+| Format | Constants vs Upstream | Known-Answer Tests | Real Firmware Data | Status |
+|---|---|---|---|---|
+| **Qualcomm `.ofp`** | Audited (6 keysets) | Derived key/IV for all 6 keysets | **Verified**: CPH1901 `.ofp` (8.16 GB), all 61/61 partitions extracted, MD5 verified against `ProFile.xml` and package `md5sum.md5` | **Verified on real data** (see limits below) |
+| **`.ozip`** (standalone, zip mode 1 & 2) | Audited (35 keys) | Synthetic v1, v2, multi-chunk | Pending real OTA `.ozip` run | Synthetic only |
+| **MediaTek `.ofp`** | Audited (8 triplets + 1 raw pair) | Derived keys, shuffles | None | Synthetic only |
+| **OnePlus `.ops`** | Audited (`MASTER_KEY`, S-box, MBOX4/5/6) | `key_update`, stream vectors, whole-item tail rule | None | Synthetic only |
+| **Realme zip `.ofp`** | Audited (password) | None | None | Unverified |
+
+### Documented Limits of the Qualcomm OFP Verification
+
+1. **Cipher Span**: The AES-128-CFB cipher operates on the first `0x40000` bytes (256 KB) of each partition. Trailing data is streamed directly.
+2. **Sparse Image Checksums**: Manifest SHA-256 for sparse images (`system`, `vendor`, `userdata`, `persist`) is calculated on the unsparsed partition, so only the container header MD5 can be verified against the file.
+3. **Source Verification**: Container integrity was proven independently by checking the `.ofp` against the package vendor's `md5sum.md5` (`df77948243b6f97aac579b99b7c37b0b`), matching bit-for-bit.
+4. **Hard-Fail Policy**: Rust enforces strict termination: if both MD5 and SHA-256 fail (or the only provided hash fails), extraction aborts immediately.
+5. **Sample Scope**: Verified on Oppo A7 CPH1901 (Qualcomm SDM450, Keyset V1.6.6+). Other keysets are validated via automated constants audit and derived-key vectors.
+
+---
+
+## Automated Tests & CI
 
 Run the automated constants audit diffing against upstream Python modules:
 ```bash
 python tools/check_constants.py
 ```
 
-Run the built-in test suite (26 unit tests) covering bitwise operations, key derivation, streaming decryption, auto-detection, robustness, and chunk boundary parity:
+Run the built-in test suite (29 active unit tests + 1 doc-test):
 ```bash
 cargo test
+```
+
+Run cross-platform synthetic parity verification:
+```bash
+python tools/parity.py
 ```
 
 ---
@@ -139,3 +166,4 @@ cargo test
 
 - Rust architecture by [Cihaimasuiro](https://github.com/Cihaimasuiro).
 - Original reverse engineering and Python research by [B. Kerler](https://github.com/bkerler).
+
