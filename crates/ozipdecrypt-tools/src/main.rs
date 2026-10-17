@@ -427,6 +427,8 @@ mod tests {
     use ozipdecrypt_core::crypto::{
         self, derive_ofp_qc_key_iv, key_shuffle, swap_nibbles, OfpKeyTriplet,
     };
+    use ozipdecrypt_core::error::OzipError;
+    use ozipdecrypt_core::reporter::{ChecksumStatus, NoopReporter};
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
 
@@ -1268,11 +1270,11 @@ mod tests {
         let item2_data = vec![0x22u8; 65536];
         let mut container = Vec::new();
 
-        let enc1 = ops::key_custom_decrypt(&item1_data, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        let enc1 = ops::key_custom_encrypt(&item1_data, ops::MASTER_KEY, &ops::MBOX5, &sbox);
         let start1 = container.len() as u64;
         container.extend(enc1);
 
-        let enc2 = ops::key_custom_decrypt(&item2_data, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        let enc2 = ops::key_custom_encrypt(&item2_data, ops::MASTER_KEY, &ops::MBOX5, &sbox);
         let start2 = container.len() as u64;
         container.extend(enc2);
 
@@ -1287,16 +1289,17 @@ mod tests {
             item2_data.len()
         );
         let xml_bytes = xml.as_bytes();
-        let enc_xml = ops::key_custom_decrypt(xml_bytes, ops::MASTER_KEY, &ops::MBOX5, &sbox);
-        let pad = (0x200 - (enc_xml.len() % 0x200)) % 0x200;
-        let mut padded_xml = enc_xml.clone();
-        padded_xml.resize(enc_xml.len() + pad, 0u8);
+        let pad = (0x200 - (xml_bytes.len() % 0x200)) % 0x200;
+        let mut padded_xml_plain = xml_bytes.to_vec();
+        padded_xml_plain.resize(xml_bytes.len() + pad, 0u8);
+        let enc_xml =
+            ops::key_custom_encrypt(&padded_xml_plain, ops::MASTER_KEY, &ops::MBOX5, &sbox);
 
         let mut trailer = vec![0u8; 0x200];
         trailer[0x18..0x1C].copy_from_slice(&(xml_bytes.len() as u32).to_le_bytes());
 
         let mut ops_bytes = container;
-        ops_bytes.extend(padded_xml);
+        ops_bytes.extend(enc_xml);
         ops_bytes.extend(trailer);
 
         std::fs::write(&ops_file, &ops_bytes).unwrap();
@@ -1305,9 +1308,25 @@ mod tests {
         let reporter = CancellingReporter {
             cancelled: cancelled_flag.clone(),
         };
-
         let res = ops::extract_ops_with_reporter(&ops_file, &out_dir, None, &reporter);
         assert!(res.is_err(), "Extraction must fail on cancel");
+
+        let req = ozipdecrypt_core::extract::ExtractRequest {
+            input: ops_file.clone(),
+            out_dir: out_dir.clone(),
+            partitions: None,
+        };
+        let keys = KeyConfig::default();
+        let cancelled_flag2 = Arc::new(AtomicBool::new(false));
+        let reporter2 = CancellingReporter {
+            cancelled: cancelled_flag2,
+        };
+        let extract_res = ozipdecrypt_core::extract::extract(&req, &keys, &reporter2);
+        assert!(
+            matches!(extract_res, Err(OzipError::Cancelled)),
+            "extract() must return Err(OzipError::Cancelled), got {:?}",
+            extract_res
+        );
 
         let part2_final = out_dir.join("part2.img");
         let part2_part = out_dir.join("part2.img.part");
@@ -1324,6 +1343,22 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_empty_partitions_list_returns_error() {
+        let tmp_dir = std::env::temp_dir();
+        let fake_file = tmp_dir.join("test_fake_archive.bin");
+        std::fs::write(&fake_file, b"PKtest").unwrap();
+        let req = ozipdecrypt_core::extract::ExtractRequest {
+            input: fake_file.clone(),
+            out_dir: tmp_dir.clone(),
+            partitions: Some(vec![]),
+        };
+        let keys = KeyConfig::default();
+        let res = ozipdecrypt_core::extract::extract(&req, &keys, &NoopReporter);
+        assert!(res.is_err(), "Empty partitions list must return an error");
+        let _ = std::fs::remove_file(&fake_file);
+    }
+
+    #[test]
     fn test_ofp_checksum_verification_rules() {
         let tmp_dir = std::env::temp_dir();
         let test_file = tmp_dir.join("test_checksum_verify.bin");
@@ -1334,23 +1369,31 @@ mod tests {
         let real_sha256 = format!("{:x}", sha2::Sha256::digest(content));
         let fake_hash = "deadbeefdeadbeefdeadbeefdeadbeef";
 
-        // 1. Both valid: must pass
-        assert!(ofp::verify_checksums(&test_file, &real_sha256, &real_md5, false).is_ok());
+        // 1. Both valid: must pass with VerifiedFull (since file size <= 0x40000)
+        let res1 = ofp::verify_checksums(&test_file, &real_sha256, &real_md5, false, &NoopReporter);
+        assert!(res1.is_ok());
+        assert_eq!(res1.unwrap(), ChecksumStatus::VerifiedFull);
 
-        // 2. MD5 valid, SHA256 invalid (sparse container behavior): must pass matching upstream
-        assert!(ofp::verify_checksums(&test_file, fake_hash, &real_md5, false).is_ok());
+        // 2. MD5 valid, SHA256 invalid (sparse container behavior): must pass with VerifiedHeadOnly
+        let res2 = ofp::verify_checksums(&test_file, fake_hash, &real_md5, false, &NoopReporter);
+        assert!(res2.is_ok());
+        assert_eq!(res2.unwrap(), ChecksumStatus::VerifiedHeadOnly);
 
-        // 3. SHA256 valid, MD5 invalid: must pass matching upstream
-        assert!(ofp::verify_checksums(&test_file, &real_sha256, fake_hash, false).is_ok());
+        // 3. SHA256 valid, MD5 invalid: must pass matching upstream with VerifiedFull
+        let res3 = ofp::verify_checksums(&test_file, &real_sha256, fake_hash, false, &NoopReporter);
+        assert!(res3.is_ok());
+        assert_eq!(res3.unwrap(), ChecksumStatus::VerifiedFull);
 
         // 4. Both invalid: MUST HARD FAIL
-        assert!(ofp::verify_checksums(&test_file, fake_hash, fake_hash, false).is_err());
+        assert!(
+            ofp::verify_checksums(&test_file, fake_hash, fake_hash, false, &NoopReporter).is_err()
+        );
 
         // 5. Only MD5 provided, but invalid: MUST HARD FAIL
-        assert!(ofp::verify_checksums(&test_file, "", fake_hash, false).is_err());
+        assert!(ofp::verify_checksums(&test_file, "", fake_hash, false, &NoopReporter).is_err());
 
         // 6. Only SHA256 provided, but invalid: MUST HARD FAIL
-        assert!(ofp::verify_checksums(&test_file, fake_hash, "", false).is_err());
+        assert!(ofp::verify_checksums(&test_file, fake_hash, "", false, &NoopReporter).is_err());
 
         let _ = std::fs::remove_file(&test_file);
     }

@@ -8,7 +8,7 @@
 //! - **Oppo / Realme `.ozip`**: Decrypts both Standalone (AES-128-ECB/CBC chunked)
 //!   and Zip-wrapped Mode 1 / Mode 2 OTA recovery archives. Supports selective partition
 //!   extraction (e.g. modem, boot) without unpacking entire multi-gigabyte archives.
-//! - **Qualcomm Snapdragon `.ofp`**: Decrypts factory flash packages using AES-128-CBC
+//! - **Qualcomm Snapdragon `.ofp`**: Decrypts factory flash packages using AES-128-CFB
 //!   key triplets, XML partition parsing (`ProFile.xml`), and sha256 integrity verification.
 //! - **MediaTek `.ofp`**: Decrypts factory packages using keytables, custom byte shuffling,
 //!   and 0x6C trailer metadata extraction.

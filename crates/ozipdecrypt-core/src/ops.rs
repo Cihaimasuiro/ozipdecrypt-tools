@@ -196,12 +196,13 @@ pub fn key_update(iv1: [u32; 4], asbox: &[u32], sbox: &[u8]) -> [u32; 4] {
     ]
 }
 
-pub fn key_custom_decrypt_chunk(
+pub fn key_custom_crypt_chunk(
     inp: &[u8],
     mut rkey: [u32; 4],
     mbox: &[u32],
     sbox: &[u8],
     is_whole_input_short: bool,
+    encrypt: bool,
 ) -> (Vec<u8>, [u32; 4]) {
     let mut outp = Vec::with_capacity(inp.len());
     let mut ptr = 0;
@@ -212,9 +213,10 @@ pub fn key_custom_decrypt_chunk(
         let mut cipher_words = [0u32; 4];
         for i in 0..4 {
             let offset = ptr + i * 4;
-            cipher_words[i] = u32::from_le_bytes(inp[offset..offset + 4].try_into().unwrap());
-            let plain_word = cipher_words[i] ^ rkey[i];
-            outp.extend_from_slice(&plain_word.to_le_bytes());
+            let inp_word = u32::from_le_bytes(inp[offset..offset + 4].try_into().unwrap());
+            let out_word = inp_word ^ rkey[i];
+            outp.extend_from_slice(&out_word.to_le_bytes());
+            cipher_words[i] = if encrypt { out_word } else { inp_word };
         }
         rkey = cipher_words;
         ptr += 16;
@@ -234,9 +236,10 @@ pub fn key_custom_decrypt_chunk(
             let take = std::cmp::min(remaining, 4);
             let mut chunk = [0u8; 4];
             chunk[..take].copy_from_slice(&inp[j..j + take]);
-            let cipher_word = u32::from_le_bytes(chunk);
-            let plain_word = cipher_word ^ rkey[m];
-            outp.extend_from_slice(&plain_word.to_le_bytes()[..take]);
+            let inp_word = u32::from_le_bytes(chunk);
+            let out_word = inp_word ^ rkey[m];
+            outp.extend_from_slice(&out_word.to_le_bytes()[..take]);
+            rkey[m] = if encrypt { out_word } else { inp_word };
             j += take;
             remaining -= take;
             m += 1;
@@ -246,8 +249,22 @@ pub fn key_custom_decrypt_chunk(
     (outp, rkey)
 }
 
+pub fn key_custom_decrypt_chunk(
+    inp: &[u8],
+    rkey: [u32; 4],
+    mbox: &[u32],
+    sbox: &[u8],
+    is_whole_input_short: bool,
+) -> (Vec<u8>, [u32; 4]) {
+    key_custom_crypt_chunk(inp, rkey, mbox, sbox, is_whole_input_short, false)
+}
+
 pub fn key_custom_decrypt(inp: &[u8], rkey: [u32; 4], mbox: &[u32], sbox: &[u8]) -> Vec<u8> {
-    key_custom_decrypt_chunk(inp, rkey, mbox, sbox, inp.len() < 16).0
+    key_custom_crypt_chunk(inp, rkey, mbox, sbox, inp.len() < 16, false).0
+}
+
+pub fn key_custom_encrypt(inp: &[u8], rkey: [u32; 4], mbox: &[u32], sbox: &[u8]) -> Vec<u8> {
+    key_custom_crypt_chunk(inp, rkey, mbox, sbox, inp.len() < 16, true).0
 }
 
 #[derive(Debug)]
@@ -270,6 +287,16 @@ pub fn extract_ops_with_reporter(
     target_partition: Option<&str>,
     reporter: &dyn ProgressReporter,
 ) -> Result<Vec<(String, u64, ChecksumStatus)>> {
+    let targets = target_partition.map(|p| vec![p.to_string()]);
+    extract_ops_partitions_with_reporter(ops_path, out_dir, targets.as_deref(), reporter)
+}
+
+pub fn extract_ops_partitions_with_reporter(
+    ops_path: &Path,
+    out_dir: &Path,
+    target_partitions: Option<&[String]>,
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<(String, u64, ChecksumStatus)>> {
     fs::create_dir_all(out_dir)?;
     let mut file = File::open(ops_path)
         .with_context(|| format!("Failed to open OnePlus OPS archive: {}", ops_path.display()))?;
@@ -287,10 +314,19 @@ pub fn extract_ops_with_reporter(
 
     let mut filtered_items = Vec::new();
     for item in items {
-        if let Some(target) = target_partition {
-            let target_lower = target.to_lowercase();
-            let file_lower = item.filename.to_lowercase();
-            if !file_lower.contains(&target_lower) {
+        if let Some(targets) = target_partitions {
+            let fn_lower = item.filename.to_lowercase();
+            let matches = targets.iter().any(|target| {
+                let t_lower = target.to_lowercase();
+                if t_lower == "modem" {
+                    fn_lower.contains("modem") || fn_lower.contains("non-hlos")
+                } else if t_lower == "wifi" || t_lower == "wlan" {
+                    fn_lower.contains("wlan")
+                } else {
+                    fn_lower == t_lower || fn_lower.trim_start_matches('/') == t_lower
+                }
+            });
+            if !matches {
                 continue;
             }
         }
@@ -298,8 +334,8 @@ pub fn extract_ops_with_reporter(
     }
 
     if filtered_items.is_empty() {
-        if let Some(target) = target_partition {
-            bail!("No OPS partition matching '{}' was found.", target);
+        if let Some(targets) = target_partitions {
+            bail!("No OPS partition matching {:?} was found.", targets);
         } else {
             bail!("No extractable partitions found in OPS archive.");
         }
@@ -338,13 +374,7 @@ pub fn extract_ops_with_reporter(
             fs::create_dir_all(parent)?;
         }
 
-        let part_path = out_file_path.with_extension(format!(
-            "{}.part",
-            out_file_path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-        ));
+        let part_path = crate::crypto::get_part_path(&out_file_path);
 
         file.seek(SeekFrom::Start(item.start))?;
 

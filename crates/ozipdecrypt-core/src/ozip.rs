@@ -556,6 +556,22 @@ pub fn extract_ozip_partition_with_reporter(
     keys: &KeyConfig,
     reporter: &dyn ProgressReporter,
 ) -> Result<Vec<(String, u64, ChecksumStatus)>> {
+    extract_ozip_partitions_with_reporter(
+        input_path,
+        out_dir,
+        &[target_partition.to_string()],
+        keys,
+        reporter,
+    )
+}
+
+pub fn extract_ozip_partitions_with_reporter(
+    input_path: &Path,
+    out_dir: &Path,
+    targets: &[String],
+    keys: &KeyConfig,
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<(String, u64, ChecksumStatus)>> {
     fs::create_dir_all(out_dir)?;
     let mut file = File::open(input_path)
         .with_context(|| format!("Unable to open {}", input_path.display()))?;
@@ -574,18 +590,25 @@ pub fn extract_ozip_partition_with_reporter(
     file.seek(SeekFrom::Start(0))?;
     let mut archive = ZipArchive::new(BufReader::new(file))?;
 
-    let target_lower = target_partition.to_lowercase();
     let matches_target = |entry_name: &str| -> bool {
-        let name_lower = entry_name.to_lowercase();
-        if target_lower == "modem" {
-            name_lower.contains("modem") || name_lower.contains("non-hlos")
-        } else if target_lower == "wifi" || target_lower == "wlan" {
-            name_lower.contains("non-hlos")
-                || name_lower.contains("wlan")
-                || name_lower.contains("wifi")
-        } else {
-            name_lower.contains(&target_lower)
-        }
+        let entry_file = Path::new(entry_name)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(entry_name);
+        targets.iter().any(|target| {
+            let t_lower = target.to_lowercase();
+            let name_lower = entry_file.to_lowercase();
+            let full_lower = entry_name.to_lowercase();
+            if t_lower == "modem" {
+                name_lower.contains("modem") || name_lower.contains("non-hlos")
+            } else if t_lower == "wifi" || t_lower == "wlan" {
+                name_lower.contains("non-hlos")
+                    || name_lower.contains("wlan")
+                    || name_lower.contains("wifi")
+            } else {
+                name_lower == t_lower || full_lower == t_lower
+            }
+        })
     };
 
     let mut clist = HashSet::new();
@@ -649,10 +672,7 @@ pub fn extract_ozip_partition_with_reporter(
 
             let file_name = Path::new(&orgfilename).file_name().unwrap();
             let dest_path = out_dir.join(file_name);
-            let part_path = dest_path.with_extension(format!(
-                "{}.part",
-                dest_path.extension().and_then(|s| s.to_str()).unwrap_or("")
-            ));
+            let part_path = crate::crypto::get_part_path(&dest_path);
 
             reporter.on_event(ProgressEvent::ItemStarted {
                 name: file_name.to_string_lossy().to_string(),
@@ -745,10 +765,7 @@ pub fn extract_ozip_partition_with_reporter(
 
             let file_name = Path::new(&orgfilename).file_name().unwrap();
             let dest_path = out_dir.join(file_name);
-            let part_path = dest_path.with_extension(format!(
-                "{}.part",
-                dest_path.extension().and_then(|s| s.to_str()).unwrap_or("")
-            ));
+            let part_path = crate::crypto::get_part_path(&dest_path);
 
             let file_size = entry.size();
 
@@ -821,8 +838,8 @@ pub fn extract_ozip_partition_with_reporter(
             }
         }
         bail!(
-            "No partition matching '{}' found in OZIP archive. Examples of files in this archive: {}",
-            target_partition,
+            "No partition matching {:?} found in OZIP archive. Examples of files in this archive: {}",
+            targets,
             available.join(", ")
         );
     }

@@ -47,6 +47,17 @@ pub fn extract_ofp_partition_with_reporter(
     keys: &KeyConfig,
     reporter: &dyn ProgressReporter,
 ) -> Result<Vec<(String, u64, ChecksumStatus)>> {
+    let targets = target_partition.map(|p| vec![p.to_string()]);
+    extract_ofp_partitions_with_reporter(ofp_path, out_dir, targets.as_deref(), keys, reporter)
+}
+
+pub fn extract_ofp_partitions_with_reporter(
+    ofp_path: &Path,
+    out_dir: &Path,
+    target_partitions: Option<&[String]>,
+    keys: &KeyConfig,
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<(String, u64, ChecksumStatus)>> {
     fs::create_dir_all(out_dir)?;
     let mut file = File::open(ofp_path)
         .with_context(|| format!("Failed to open OFP file: {}", ofp_path.display()))?;
@@ -55,7 +66,7 @@ pub fn extract_ofp_partition_with_reporter(
     // Check if the file is a password-protected ZIP container (Realme OFP variant)
     let mut header2 = [0u8; 2];
     if file.read_exact(&mut header2).is_ok() && &header2 == b"PK" {
-        return extract_realme_zip_ofp(ofp_path, out_dir, target_partition, reporter);
+        return extract_realme_zip_ofp(ofp_path, out_dir, target_partitions, reporter);
     }
 
     if keys.ofp_keysets.is_empty() {
@@ -83,21 +94,25 @@ pub fn extract_ofp_partition_with_reporter(
 
     let mut filtered_items = Vec::new();
     for item in items {
-        if let Some(target) = target_partition {
-            let target_lower = target.to_lowercase();
+        if let Some(targets) = target_partitions {
             let fn_lower = item.filename.to_lowercase();
             let label_lower = item.label.to_lowercase();
-            let matches = if target_lower == "modem" {
-                fn_lower.contains("modem")
-                    || fn_lower.contains("non-hlos")
-                    || label_lower == "modem"
-            } else if target_lower == "wifi" || target_lower == "wlan" {
-                fn_lower.contains("non-hlos")
-                    || fn_lower.contains("wlan")
-                    || label_lower.contains("wlan")
-            } else {
-                fn_lower.contains(&target_lower) || label_lower.contains(&target_lower)
-            };
+            let matches = targets.iter().any(|target| {
+                let t_lower = target.to_lowercase();
+                if t_lower == "modem" {
+                    fn_lower.contains("modem")
+                        || fn_lower.contains("non-hlos")
+                        || label_lower == "modem"
+                } else if t_lower == "wifi" || t_lower == "wlan" {
+                    fn_lower.contains("non-hlos")
+                        || fn_lower.contains("wlan")
+                        || label_lower.contains("wlan")
+                } else {
+                    fn_lower == t_lower
+                        || fn_lower.trim_start_matches('/') == t_lower
+                        || label_lower == t_lower
+                }
+            });
             if !matches {
                 continue;
             }
@@ -106,10 +121,10 @@ pub fn extract_ofp_partition_with_reporter(
     }
 
     if filtered_items.is_empty() {
-        if let Some(target) = target_partition {
+        if let Some(targets) = target_partitions {
             bail!(
-                "No partition matching '{}' was found in ProFile.xml",
-                target
+                "No partition matching {:?} was found in ProFile.xml",
+                targets
             );
         } else {
             bail!("No extractable partitions found in ProFile.xml");
@@ -418,13 +433,7 @@ fn extract_single_item(
         return Ok(ChecksumStatus::NoHashInManifest);
     }
 
-    let part_path = target_path.with_extension(format!(
-        "{}.part",
-        target_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-    ));
+    let part_path = crate::crypto::get_part_path(&target_path);
 
     src_file.seek(SeekFrom::Start(item.start))?;
 
@@ -482,7 +491,13 @@ fn extract_single_item(
         out.flush()?;
         drop(out);
 
-        let chk_status = verify_checksums(&part_path, &item.sha256, &item.md5, item.is_copy_only)?;
+        let chk_status = verify_checksums(
+            &part_path,
+            &item.sha256,
+            &item.md5,
+            item.is_copy_only,
+            reporter,
+        )?;
         fs::rename(&part_path, &target_path)?;
         Ok(chk_status)
     })();
@@ -499,73 +514,91 @@ pub fn verify_checksums(
     file_path: &Path,
     sha256_sum: &str,
     md5_sum: &str,
-    is_copy: bool,
+    _is_copy: bool,
+    reporter: &dyn ProgressReporter,
 ) -> Result<ChecksumStatus> {
-    let mode_str = if is_copy { "Copy" } else { "Decrypt" };
     let mut f = File::open(file_path)?;
     let metadata_len = f.metadata()?.len();
 
-    let mut md5_verified = true;
-    if !md5_sum.is_empty() {
-        let check_len = std::cmp::min(0x40000, metadata_len) as usize;
-        let mut head_buf = vec![0u8; check_len];
-        f.read_exact(&mut head_buf)?;
-        let computed_md5 = format!("{:x}", Md5::digest(&head_buf));
-        if !computed_md5.eq_ignore_ascii_case(md5_sum) {
-            md5_verified = false;
-        }
-    }
-
-    let mut sha256_verified = true;
-    let mut full_file_sha256_matched = false;
-    if !sha256_sum.is_empty() {
-        let mut matches = false;
-        // Test SHA256 of first 0x40000 bytes OR total file length (matches Kerler's verification)
-        for &limit in &[Some(0x40000u64), None] {
-            f.seek(SeekFrom::Start(0))?;
-            let mut hasher = Sha256::new();
-            match limit {
-                Some(max_bytes) => {
-                    let mut remain = max_bytes;
-                    let mut buf = [0u8; 8192];
-                    while remain > 0 {
-                        let to_read = std::cmp::min(remain, buf.len() as u64) as usize;
-                        let n = f.read(&mut buf[..to_read])?;
-                        if n == 0 {
-                            break;
-                        }
-                        hasher.update(&buf[..n]);
-                        remain -= n as u64;
-                    }
-                }
-                None => {
-                    let mut buf = [0u8; 8192];
-                    while let Ok(n) = f.read(&mut buf) {
-                        if n == 0 {
-                            break;
-                        }
-                        hasher.update(&buf[..n]);
-                    }
-                }
-            }
-            let digest_str = format!("{:x}", hasher.finalize());
-            if digest_str.eq_ignore_ascii_case(sha256_sum) {
-                matches = true;
-                if limit.is_none() {
-                    full_file_sha256_matched = true;
-                }
-                break;
-            }
-        }
-        if !matches {
-            sha256_verified = false;
-        }
-    }
-
-    let md5_bad = !md5_sum.is_empty() && !md5_verified;
-    let sha256_bad = !sha256_sum.is_empty() && !sha256_verified;
     let has_md5 = !md5_sum.is_empty();
     let has_sha256 = !sha256_sum.is_empty();
+
+    if !has_md5 && !has_sha256 {
+        return Ok(ChecksumStatus::NoHashInManifest);
+    }
+
+    let head_limit = std::cmp::min(0x40000, metadata_len);
+    let mut md5_hasher = if has_md5 { Some(Md5::new()) } else { None };
+    let mut head_sha256_hasher = if has_sha256 {
+        Some(Sha256::new())
+    } else {
+        None
+    };
+    let mut full_sha256_hasher = if has_sha256 {
+        Some(Sha256::new())
+    } else {
+        None
+    };
+
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut bytes_read = 0u64;
+
+    while bytes_read < metadata_len {
+        if reporter.is_cancelled() {
+            return Err(OzipError::Cancelled.into());
+        }
+        let to_read = std::cmp::min(buf.len() as u64, metadata_len - bytes_read) as usize;
+        let n = f.read(&mut buf[..to_read])?;
+        if n == 0 {
+            break;
+        }
+
+        if bytes_read < head_limit {
+            let head_n = std::cmp::min(n as u64, head_limit - bytes_read) as usize;
+            if let Some(ref mut m) = md5_hasher {
+                m.update(&buf[..head_n]);
+            }
+            if let Some(ref mut h) = head_sha256_hasher {
+                h.update(&buf[..head_n]);
+            }
+        }
+
+        if let Some(ref mut fs) = full_sha256_hasher {
+            fs.update(&buf[..n]);
+        }
+
+        bytes_read += n as u64;
+        reporter.on_event(ProgressEvent::Progress {
+            bytes_done: bytes_read,
+            bytes_total: metadata_len,
+        });
+    }
+
+    let md5_verified = if let Some(m) = md5_hasher {
+        let computed = format!("{:x}", m.finalize());
+        computed.eq_ignore_ascii_case(md5_sum)
+    } else {
+        true
+    };
+
+    let (sha256_verified, full_file_sha256_matched) = if has_sha256 {
+        let full_digest = format!("{:x}", full_sha256_hasher.unwrap().finalize());
+        let head_digest = format!("{:x}", head_sha256_hasher.unwrap().finalize());
+
+        if full_digest.eq_ignore_ascii_case(sha256_sum) {
+            (true, true)
+        } else if head_digest.eq_ignore_ascii_case(sha256_sum) {
+            let is_full = metadata_len <= 0x40000;
+            (true, is_full)
+        } else {
+            (false, false)
+        }
+    } else {
+        (true, false)
+    };
+
+    let md5_bad = has_md5 && !md5_verified;
+    let sha256_bad = has_sha256 && !sha256_verified;
 
     let is_failure = if has_md5 && has_sha256 {
         md5_bad && sha256_bad
@@ -578,18 +611,20 @@ pub fn verify_checksums(
     };
 
     if is_failure {
-        bail!(
-            "{}: Checksum verification failed for {} (md5_ok: {}, sha256_ok: {})",
-            mode_str,
-            file_path.display(),
-            md5_verified,
-            sha256_verified
-        );
+        let item_name = file_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        let expected = if has_sha256 { sha256_sum } else { md5_sum };
+        return Err(OzipError::ChecksumMismatch {
+            item: item_name.to_string(),
+            expected: expected.to_string(),
+            calculated: format!("md5_ok:{}, sha256_ok:{}", md5_verified, sha256_verified),
+        }
+        .into());
     }
 
-    if !has_md5 && !has_sha256 {
-        Ok(ChecksumStatus::NoHashInManifest)
-    } else if full_file_sha256_matched {
+    if full_file_sha256_matched {
         Ok(ChecksumStatus::VerifiedFull)
     } else {
         Ok(ChecksumStatus::VerifiedHeadOnly)
@@ -599,7 +634,7 @@ pub fn verify_checksums(
 fn extract_realme_zip_ofp(
     ofp_path: &Path,
     out_dir: &Path,
-    target_partition: Option<&str>,
+    target_partitions: Option<&[String]>,
     reporter: &dyn ProgressReporter,
 ) -> Result<Vec<(String, u64, ChecksumStatus)>> {
     let zippw = b"flash@realme$50E7F7D847732396F1582CD62DD385ED7ABB0897";
@@ -613,9 +648,15 @@ fn extract_realme_zip_ofp(
             if raw_name.ends_with('/') {
                 continue;
             }
-            if let Some(target) = target_partition {
-                let target_lower = target.to_lowercase();
-                if !raw_name.to_lowercase().contains(&target_lower) {
+            if let Some(targets) = target_partitions {
+                let matches = targets.iter().any(|target| {
+                    raw_name.eq_ignore_ascii_case(target)
+                        || Path::new(&raw_name)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .is_some_and(|f| f.eq_ignore_ascii_case(target))
+                });
+                if !matches {
                     continue;
                 }
             }
@@ -624,10 +665,10 @@ fn extract_realme_zip_ofp(
     }
 
     if entries_to_extract.is_empty() {
-        if let Some(target) = target_partition {
+        if let Some(targets) = target_partitions {
             bail!(
-                "No partition matching '{}' found in Realme ZIP archive.",
-                target
+                "No partition matching {:?} found in Realme ZIP archive.",
+                targets
             );
         } else {
             bail!("No files extracted from Realme ZIP archive.");
@@ -672,13 +713,7 @@ fn extract_realme_zip_ofp(
             fs::create_dir_all(parent)?;
         }
 
-        let part_path = out_file_path.with_extension(format!(
-            "{}.part",
-            out_file_path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-        ));
+        let part_path = crate::crypto::get_part_path(&out_file_path);
 
         let write_res = (|| -> Result<()> {
             let mut out = File::create(&part_path)?;

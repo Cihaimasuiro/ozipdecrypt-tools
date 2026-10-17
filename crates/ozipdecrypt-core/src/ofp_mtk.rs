@@ -152,6 +152,16 @@ pub fn extract_ofp_mtk_with_reporter(
     target_partition: Option<&str>,
     reporter: &dyn ProgressReporter,
 ) -> Result<Vec<(String, u64, ChecksumStatus)>> {
+    let targets = target_partition.map(|p| vec![p.to_string()]);
+    extract_ofp_mtk_partitions_with_reporter(ofp_path, out_dir, targets.as_deref(), reporter)
+}
+
+pub fn extract_ofp_mtk_partitions_with_reporter(
+    ofp_path: &Path,
+    out_dir: &Path,
+    target_partitions: Option<&[String]>,
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<(String, u64, ChecksumStatus)>> {
     fs::create_dir_all(out_dir)?;
     let mut file = File::open(ofp_path).with_context(|| {
         format!(
@@ -219,11 +229,22 @@ pub fn extract_ofp_mtk_with_reporter(
 
     let mut filtered_entries = Vec::new();
     for entry in entries {
-        if let Some(target) = target_partition {
-            let target_lower = target.to_lowercase();
+        if let Some(targets) = target_partitions {
+            let fn_lower = entry.filename.to_lowercase();
             let name_lower = entry.name.to_lowercase();
-            let file_lower = entry.filename.to_lowercase();
-            if !name_lower.contains(&target_lower) && !file_lower.contains(&target_lower) {
+            let matches = targets.iter().any(|target| {
+                let t_lower = target.to_lowercase();
+                if t_lower == "modem" {
+                    fn_lower.contains("modem")
+                        || fn_lower.contains("md1img")
+                        || name_lower == "modem"
+                } else if t_lower == "wifi" || t_lower == "wlan" {
+                    fn_lower.contains("wlan") || name_lower.contains("wlan")
+                } else {
+                    fn_lower == t_lower || name_lower == t_lower
+                }
+            });
+            if !matches {
                 continue;
             }
         }
@@ -231,8 +252,8 @@ pub fn extract_ofp_mtk_with_reporter(
     }
 
     if filtered_entries.is_empty() {
-        if let Some(target) = target_partition {
-            bail!("No MediaTek partition matching '{}' was found.", target);
+        if let Some(targets) = target_partitions {
+            bail!("No MediaTek partition matching {:?} was found.", targets);
         } else {
             bail!("No extractable partitions found in MediaTek OFP archive.");
         }
@@ -280,13 +301,7 @@ pub fn extract_ofp_mtk_with_reporter(
             );
         }
 
-        let part_path = out_file_path.with_extension(format!(
-            "{}.part",
-            out_file_path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-        ));
+        let part_path = crate::crypto::get_part_path(&out_file_path);
 
         let write_res = (|| -> Result<()> {
             let mut out = File::create(&part_path)?;

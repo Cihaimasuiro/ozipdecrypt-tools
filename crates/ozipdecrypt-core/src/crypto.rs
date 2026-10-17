@@ -255,3 +255,10 @@ pub fn safe_join(base: &Path, filename: &str) -> Result<PathBuf> {
     }
     Ok(base.join(rel))
 }
+
+pub fn get_part_path(target_path: &Path) -> PathBuf {
+    match target_path.file_name() {
+        Some(name) => target_path.with_file_name(format!("{}.part", name.to_string_lossy())),
+        None => target_path.with_extension("part"),
+    }
+}
