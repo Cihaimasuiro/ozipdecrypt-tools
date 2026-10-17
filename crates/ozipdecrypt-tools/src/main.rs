@@ -1420,24 +1420,35 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp_dir).unwrap();
 
-        let make_ops = |filename: &str, sha: &str, truncate: bool| -> std::path::PathBuf {
+        let make_ops = |filename: &str,
+                        sha: &str,
+                        truncate: bool,
+                        encrypted: bool|
+         -> std::path::PathBuf {
             let path = tmp_dir.join(filename);
             let mut container = Vec::new();
-            let enc_data = ops::key_custom_encrypt(&item_data, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+            let raw_data = if encrypted {
+                ops::key_custom_encrypt(&item_data, ops::MASTER_KEY, &ops::MBOX5, &sbox)
+            } else {
+                item_data.clone()
+            };
             let start = container.len() as u64;
             if truncate {
-                container.extend(&enc_data[..enc_data.len() / 2]); // Truncated mid-partition
+                container.extend(&raw_data[..raw_data.len() / 2]); // Truncated mid-partition
             } else {
-                container.extend(enc_data);
+                container.extend(raw_data);
             }
 
+            let group_tag = if encrypted { "Sahara" } else { "Firmware" };
             let xml = format!(
-                "<?xml version=\"1.0\" encoding=\"utf-8\"?><data><Sahara>\
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?><data><{}>\
                  <File Path=\"test.img\" FileOffsetInSrc=\"{}\" SizeInByteInSrc=\"{}\" Sha256=\"{}\"/>\
-                 </Sahara></data>",
+                 </{}></data>",
+                group_tag,
                 start / 0x200,
                 item_data.len(),
-                sha
+                sha,
+                group_tag
             );
             let xml_bytes = xml.as_bytes();
             let pad = (0x200 - (xml_bytes.len() % 0x200)) % 0x200;
@@ -1457,19 +1468,20 @@ mod tests {
             path
         };
 
-        // 1. Valid SHA256: passes with VerifiedFull
-        let valid_ops = make_ops("valid.ops", &real_sha256, false);
+        // 1. Valid SHA256 (encrypted): passes with VerifiedFull
+        let valid_ops = make_ops("valid.ops", &real_sha256, false, true);
         let out_valid = tmp_dir.join("out_valid");
         let res1 = ops::extract_ops_with_reporter(&valid_ops, &out_valid, None, &NoopReporter);
         assert!(res1.is_ok(), "Valid SHA-256 must succeed, got {:?}", res1);
         let items = res1.unwrap();
         assert_eq!(items[0].2, ChecksumStatus::VerifiedFull);
 
-        // 2. Corrupt SHA256 in manifest: fails with ChecksumMismatch (downcasted to OzipError)
+        // 2. Corrupt SHA256 in manifest (encrypted): fails with ChecksumMismatch (downcasted to OzipError)
         let corrupt_ops = make_ops(
             "corrupt.ops",
             "badsha256hashbadsha256hashbadsha256hashbadsha256hashbadsha256hash",
             false,
+            true,
         );
         let out_corrupt = tmp_dir.join("out_corrupt");
         let req = ozipdecrypt_core::extract::ExtractRequest {
@@ -1484,8 +1496,8 @@ mod tests {
             res2
         );
 
-        // 3. Truncated container: fails with IO / unexpected EOF error, NOT ChecksumMismatch
-        let trunc_ops = make_ops("trunc.ops", &real_sha256, true);
+        // 3. Truncated container (encrypted): fails with IO / unexpected EOF error, NOT ChecksumMismatch
+        let trunc_ops = make_ops("trunc.ops", &real_sha256, true, true);
         let out_trunc = tmp_dir.join("out_trunc");
         let req_trunc = ozipdecrypt_core::extract::ExtractRequest {
             input: trunc_ops,
@@ -1495,9 +1507,41 @@ mod tests {
         let res3 =
             ozipdecrypt_core::extract::extract(&req_trunc, &KeyConfig::default(), &NoopReporter);
         assert!(
-            matches!(res3, Err(OzipError::Io(_)) | Err(OzipError::Truncated(_))),
-            "Expected Io / Truncated error for truncated file, got {:?}",
+            matches!(res3, Err(OzipError::Io(ref io_err)) if io_err.kind() == std::io::ErrorKind::UnexpectedEof),
+            "Expected UnexpectedEof error from read_exact, got {:?}",
             res3
+        );
+
+        // 4. Valid SHA256 (unencrypted): proves inline hashing on unencrypted branch works
+        let valid_plain_ops = make_ops("valid_plain.ops", &real_sha256, false, false);
+        let out_valid_plain = tmp_dir.join("out_valid_plain");
+        let res4 =
+            ops::extract_ops_with_reporter(&valid_plain_ops, &out_valid_plain, None, &NoopReporter);
+        assert!(
+            res4.is_ok(),
+            "Valid unencrypted SHA-256 must succeed, got {:?}",
+            res4
+        );
+        let items_plain = res4.unwrap();
+        assert_eq!(items_plain[0].2, ChecksumStatus::VerifiedFull);
+
+        // 5. Truncated container (unencrypted): proves read_exact fails with UnexpectedEof on unencrypted branch
+        let trunc_plain_ops = make_ops("trunc_plain.ops", &real_sha256, true, false);
+        let out_trunc_plain = tmp_dir.join("out_trunc_plain");
+        let req_trunc_plain = ozipdecrypt_core::extract::ExtractRequest {
+            input: trunc_plain_ops,
+            out_dir: out_trunc_plain,
+            partitions: None,
+        };
+        let res5 = ozipdecrypt_core::extract::extract(
+            &req_trunc_plain,
+            &KeyConfig::default(),
+            &NoopReporter,
+        );
+        assert!(
+            matches!(res5, Err(OzipError::Io(ref io_err)) if io_err.kind() == std::io::ErrorKind::UnexpectedEof),
+            "Expected UnexpectedEof error from read_exact on unencrypted branch, got {:?}",
+            res5
         );
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
