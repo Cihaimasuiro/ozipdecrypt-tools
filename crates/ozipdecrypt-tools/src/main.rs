@@ -1,14 +1,9 @@
-mod crypto;
-mod detect;
 mod flash;
-mod ofp;
-mod ofp_mtk;
-mod ops;
-mod ozip;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use crypto::KeyConfig;
+use ozipdecrypt_core::crypto::KeyConfig;
+use ozipdecrypt_core::{detect, ofp, ofp_mtk, ops, ozip};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -327,7 +322,7 @@ mod tests {
     use super::*;
     use aes::cipher::{BlockEncrypt, KeyInit};
     use aes::Aes128;
-    use crypto::{derive_ofp_qc_key_iv, key_shuffle, swap_nibbles, OfpKeyTriplet};
+    use ozipdecrypt_core::crypto::{self, derive_ofp_qc_key_iv, key_shuffle, swap_nibbles, OfpKeyTriplet};
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
 

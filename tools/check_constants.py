@@ -56,11 +56,22 @@ def resolve_python_sources(root: Path) -> dict:
                 break
     return found
 
+def find_rust_file(root: Path, filename: str) -> Path:
+    candidates = [
+        root / "crates" / "ozipdecrypt-core" / "src" / filename,
+        root / "crates" / "ozipdecrypt-tools" / "src" / filename,
+        root / "src" / filename,
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    return root / "src" / filename
+
 def check_ozip_keys(root: Path, ozip_py: Path) -> bool:
-    crypto_rs = (root / "src" / "crypto.rs").read_text(encoding="utf-8")
+    crypto_rs = find_rust_file(root, "crypto.rs").read_text(encoding="utf-8")
     m_rs = re.search(r"pub const DEFAULT_OZIP_KEYS:\s*&\[&str\]\s*=\s*&\[(.*?)\];", crypto_rs, re.DOTALL)
     if not m_rs:
-        print("[FAIL] Could not locate DEFAULT_OZIP_KEYS in src/crypto.rs")
+        print("[FAIL] Could not locate DEFAULT_OZIP_KEYS in crypto.rs")
         return False
     rust_keys = [k.strip().upper() for k in re.findall(r'"([0-9A-Fa-f]{32})"', m_rs.group(1))]
 
@@ -84,10 +95,10 @@ def check_ozip_keys(root: Path, ozip_py: Path) -> bool:
     return True
 
 def check_qc_keysets(root: Path, qc_py: Path) -> bool:
-    crypto_rs = (root / "src" / "crypto.rs").read_text(encoding="utf-8")
+    crypto_rs = find_rust_file(root, "crypto.rs").read_text(encoding="utf-8")
     m_rs = re.search(r"pub const DEFAULT_OFP_KEYSETS:\s*&\[\(&str,\s*&str,\s*&str,\s*&str\)\]\s*=\s*&\[(.*?)\];", crypto_rs, re.DOTALL)
     if not m_rs:
-        print("[FAIL] Could not locate DEFAULT_OFP_KEYSETS in src/crypto.rs")
+        print("[FAIL] Could not locate DEFAULT_OFP_KEYSETS in crypto.rs")
         return False
 
     # Extract tuples of (name, k1, k2, k3)
@@ -124,10 +135,10 @@ def check_qc_keysets(root: Path, qc_py: Path) -> bool:
     return True
 
 def check_mtk_keytables(root: Path, mtk_py: Path) -> bool:
-    ofp_mtk_rs = (root / "src" / "ofp_mtk.rs").read_text(encoding="utf-8")
+    ofp_mtk_rs = find_rust_file(root, "ofp_mtk.rs").read_text(encoding="utf-8")
     m_rs = re.search(r"pub const MTK_KEYTABLES:\s*&\[&\[&str\]\]\s*=\s*&\[(.*?)\];", ofp_mtk_rs, re.DOTALL)
     if not m_rs:
-        print("[FAIL] Could not locate MTK_KEYTABLES in src/ofp_mtk.rs")
+        print("[FAIL] Could not locate MTK_KEYTABLES in ofp_mtk.rs")
         return False
 
     # Extract sub-arrays
@@ -164,10 +175,10 @@ def check_mtk_keytables(root: Path, mtk_py: Path) -> bool:
     return True
 
 def check_realme_zip_password(root: Path, qc_py: Path) -> bool:
-    ofp_rs = (root / "src" / "ofp.rs").read_text(encoding="utf-8")
+    ofp_rs = find_rust_file(root, "ofp.rs").read_text(encoding="utf-8")
     m_rs = re.search(r'let\s+zippw\s*=\s*b"([^"]+)";', ofp_rs)
     if not m_rs:
-        print("[FAIL] Could not locate zippw in src/ofp.rs")
+        print("[FAIL] Could not locate zippw in ofp.rs")
         return False
     rust_pw = m_rs.group(1)
 
@@ -186,13 +197,13 @@ def check_realme_zip_password(root: Path, qc_py: Path) -> bool:
     return True
 
 def check_ops_constants(root: Path, ops_py: Path) -> bool:
-    ops_rs = (root / "src" / "ops.rs").read_text(encoding="utf-8")
+    ops_rs = find_rust_file(root, "ops.rs").read_text(encoding="utf-8")
     py_text = ops_py.read_text(encoding="utf-8")
 
     # 1. MASTER_KEY
     m_mkey_rs = re.search(r"pub const MASTER_KEY:\s*\[u32;\s*4\]\s*=\s*\[(.*?)\];", ops_rs, re.DOTALL)
     if not m_mkey_rs:
-        print("[FAIL] Could not locate MASTER_KEY in src/ops.rs")
+        print("[FAIL] Could not locate MASTER_KEY in ops.rs")
         return False
     rust_mkey = [int(x.strip(), 16) for x in re.findall(r"0x[0-9A-Fa-f]+", m_mkey_rs.group(1))]
 

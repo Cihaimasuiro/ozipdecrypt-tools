@@ -1,14 +1,20 @@
-[package]
-name = "ozipdecrypt-tools"
+[workspace]
+resolver = "2"
+members = [
+    "crates/ozipdecrypt-core",
+    "crates/ozipdecrypt-tools",
+]
+
+[workspace.package]
 version = "0.2.0"
 edition = "2021"
 authors = ["Cihaimasuiro <https://github.com/Cihaimasuiro>"]
-description = "Unified high-performance Rust CLI for decrypting Oppo, Realme, and OnePlus firmware (.ozip, .ofp, .ops)"
 license = "MIT"
 repository = "https://github.com/Cihaimasuiro/ozipdecrypt-tools"
-exclude = ["tools/", "tasks/", "source-code/"]
+exclude = ["tools/", "tasks/", "source-code/", "samples/"]
 
-[dependencies]
+[workspace.dependencies]
+thiserror = "1.0"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 aes = "0.8"
@@ -21,3 +27,4 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 quick-xml = { version = "0.36", features = ["serialize"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
+ozipdecrypt-core = { path = "crates/ozipdecrypt-core" }
