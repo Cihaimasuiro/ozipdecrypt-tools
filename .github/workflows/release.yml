@@ -160,7 +160,7 @@ jobs:
     if: always() && needs.verify-gate.result == 'success' && !cancelled() && needs.build-release.result != 'cancelled'
     steps:
       - name: Download all built packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
