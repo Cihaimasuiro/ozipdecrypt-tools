@@ -2,8 +2,9 @@ mod flash;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use ozipdecrypt_core::crypto::KeyConfig;
+use ozipdecrypt_core::crypto::{self, KeyConfig};
 use ozipdecrypt_core::{detect, ofp, ofp_mtk, ops, ozip};
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -300,11 +301,16 @@ fn handle_extract(
             ops::extract_ops(input, target_dir, partition)?;
         }
         detect::ContainerType::StandardZip => {
-            println!("[+] File is already a standard unencrypted ZIP archive.");
-            if sideload {
+            println!("[+] File is a standard unencrypted ZIP archive.");
+            if let Some(dir) = out_dir {
+                extract_standard_zip(input, dir, partition)?;
+            } else if sideload {
                 flash::adb_sideload(input)?;
+            } else if let Some(target) = partition {
+                let default_dir = PathBuf::from("./extracted_zip");
+                extract_standard_zip(input, &default_dir, Some(target))?;
             } else {
-                println!("[*] Pass '--sideload' to automatically flash this update via ADB.");
+                println!("[*] Pass '-o <dir>' to unpack files, or '--sideload' to flash via ADB.");
             }
         }
         detect::ContainerType::Unknown => {
@@ -315,6 +321,56 @@ fn handle_extract(
         }
     }
 
+    Ok(())
+}
+
+fn extract_standard_zip(input: &Path, out_dir: &Path, target: Option<&str>) -> Result<()> {
+    fs::create_dir_all(out_dir)?;
+    let file = File::open(input)?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))?;
+    let mut count = 0;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let name = entry.name()?.to_string();
+        if entry.is_dir() {
+            continue;
+        }
+
+        if let Some(t) = target {
+            if !name.to_lowercase().contains(&t.to_lowercase()) {
+                continue;
+            }
+        }
+
+        let dest = if target.is_some() {
+            let fname = Path::new(&name).file_name().unwrap();
+            out_dir.join(fname)
+        } else {
+            crypto::safe_join(out_dir, &name)?
+        };
+
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        println!("[*] Extracting: {} -> {}", name, dest.display());
+        let mut out = File::create(&dest)?;
+        std::io::copy(&mut entry, &mut out)?;
+        count += 1;
+    }
+
+    if count == 0 {
+        if let Some(t) = target {
+            bail!("No entry matching '{}' found in ZIP archive.", t);
+        }
+    }
+
+    println!(
+        "\n[+] Successfully extracted {} item(s) to {}",
+        count,
+        out_dir.display()
+    );
     Ok(())
 }
 

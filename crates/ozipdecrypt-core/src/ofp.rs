@@ -16,6 +16,7 @@ type Aes128Cfb = cfb_mode::Decryptor<Aes128>;
 #[derive(Debug, Clone)]
 pub struct OfpPartitionItem {
     pub filename: String,
+    pub label: String,
     pub start: u64,
     pub length: u64,
     pub rlength: u64,
@@ -86,7 +87,19 @@ pub fn extract_ofp_partition(
         if let Some(target) = target_partition {
             let target_lower = target.to_lowercase();
             let fn_lower = item.filename.to_lowercase();
-            if !fn_lower.contains(&target_lower) {
+            let label_lower = item.label.to_lowercase();
+            let matches = if target_lower == "modem" {
+                fn_lower.contains("modem")
+                    || fn_lower.contains("non-hlos")
+                    || label_lower == "modem"
+            } else if target_lower == "wifi" || target_lower == "wlan" {
+                fn_lower.contains("non-hlos")
+                    || fn_lower.contains("wlan")
+                    || label_lower.contains("wlan")
+            } else {
+                fn_lower.contains(&target_lower) || label_lower.contains(&target_lower)
+            };
+            if !matches {
                 continue;
             }
         }
@@ -300,6 +313,7 @@ fn parse_element_item(
 
     Ok(Some(OfpPartitionItem {
         filename,
+        label: attribs.get("label").cloned().unwrap_or_default(),
         start: start as u64,
         length: effective_length,
         rlength,
