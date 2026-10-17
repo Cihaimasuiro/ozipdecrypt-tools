@@ -46,13 +46,16 @@ enum Commands {
         /// Path to firmware file to inspect
         input: PathBuf,
     },
-    /// Decrypt an Oppo/Realme .ozip file to a standard .zip archive (and optionally sideload it)
+    /// Decrypt an Oppo/Realme .ozip file to a standard .zip archive or extract specific partition(s)
     Ozip {
         /// Input .ozip firmware file
         input: PathBuf,
-        /// Output .zip file path
+        /// Output .zip file path or target directory when extracting partitions
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Optional single partition to extract (e.g., "modem" or "boot")
+        #[arg(short, long)]
+        partition: Option<String>,
         /// Automatically run `adb sideload` once decryption finishes
         #[arg(long)]
         sideload: bool,
@@ -118,30 +121,37 @@ fn main() -> Result<()> {
             Some(Commands::Ozip {
                 input,
                 output,
+                partition,
                 sideload,
             }),
             _,
         ) => {
-            let out_path = output.unwrap_or_else(|| {
-                if input
-                    .extension()
-                    .map(|e| e.eq_ignore_ascii_case("zip"))
-                    .unwrap_or(false)
-                {
-                    input.with_file_name(format!(
-                        "{}.decrypted.zip",
-                        input
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("firmware")
-                    ))
-                } else {
-                    input.with_extension("zip")
+            if let Some(target) = partition {
+                let default_dir = PathBuf::from("./extracted_ozip");
+                let target_dir = output.as_deref().unwrap_or(&default_dir);
+                ozip::extract_ozip_partition(&input, target_dir, &target, &key_config)?;
+            } else {
+                let out_path = output.unwrap_or_else(|| {
+                    if input
+                        .extension()
+                        .map(|e| e.eq_ignore_ascii_case("zip"))
+                        .unwrap_or(false)
+                    {
+                        input.with_file_name(format!(
+                            "{}.decrypted.zip",
+                            input
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("firmware")
+                        ))
+                    } else {
+                        input.with_extension("zip")
+                    }
+                });
+                ozip::decrypt_ozip(&input, &out_path, &key_config)?;
+                if sideload {
+                    flash::adb_sideload(&out_path)?;
                 }
-            });
-            ozip::decrypt_ozip(&input, &out_path, &key_config)?;
-            if sideload {
-                flash::adb_sideload(&out_path)?;
             }
         }
         (
@@ -224,32 +234,38 @@ fn handle_extract(
 
     match container_type {
         detect::ContainerType::Ozip => {
-            let out_path = if let Some(dir) = out_dir {
-                dir.join(format!(
-                    "{}.zip",
-                    input
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("firmware")
-                ))
-            } else if input
-                .extension()
-                .map(|e| e.eq_ignore_ascii_case("zip"))
-                .unwrap_or(false)
-            {
-                input.with_file_name(format!(
-                    "{}.decrypted.zip",
-                    input
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("firmware")
-                ))
+            if let Some(target) = partition {
+                let default_dir = PathBuf::from("./extracted_ozip");
+                let target_dir = out_dir.unwrap_or(&default_dir);
+                ozip::extract_ozip_partition(input, target_dir, target, key_config)?;
             } else {
-                input.with_extension("zip")
-            };
-            ozip::decrypt_ozip(input, &out_path, key_config)?;
-            if sideload {
-                flash::adb_sideload(&out_path)?;
+                let out_path = if let Some(dir) = out_dir {
+                    dir.join(format!(
+                        "{}.zip",
+                        input
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("firmware")
+                    ))
+                } else if input
+                    .extension()
+                    .map(|e| e.eq_ignore_ascii_case("zip"))
+                    .unwrap_or(false)
+                {
+                    input.with_file_name(format!(
+                        "{}.decrypted.zip",
+                        input
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("firmware")
+                    ))
+                } else {
+                    input.with_extension("zip")
+                };
+                ozip::decrypt_ozip(input, &out_path, key_config)?;
+                if sideload {
+                    flash::adb_sideload(&out_path)?;
+                }
             }
         }
         detect::ContainerType::OfpQualcomm => {
@@ -312,7 +328,32 @@ fn handle_info(input: &Path) -> Result<()> {
         info.file_size
     );
     println!("Format:       {}", info.container_type);
+    if let Some(ref soc) = info.chipset {
+        println!("Chipset / SoC: {}", soc);
+    }
     println!("Description:  {}", info.details);
+    if !info.partitions.is_empty() {
+        println!("\nDiscovered Partitions ({} items):", info.partitions.len());
+        for part in &info.partitions {
+            let note = if part.name.to_lowercase().contains("non-hlos")
+                || part.name.to_lowercase().contains("modem")
+            {
+                " [Modem / Wi-Fi Baseband]"
+            } else if part.name.to_lowercase().contains("boot") {
+                " [Kernel / Boot Image]"
+            } else if part.name.to_lowercase().contains("recovery") {
+                " [Recovery Image]"
+            } else {
+                ""
+            };
+            println!(
+                "  - {:<35} {:>9.2} MB{}",
+                part.name,
+                part.size as f64 / (1024.0 * 1024.0),
+                note
+            );
+        }
+    }
     println!("=====================================\n");
     Ok(())
 }
@@ -322,7 +363,9 @@ mod tests {
     use super::*;
     use aes::cipher::{BlockEncrypt, KeyInit};
     use aes::Aes128;
-    use ozipdecrypt_core::crypto::{self, derive_ofp_qc_key_iv, key_shuffle, swap_nibbles, OfpKeyTriplet};
+    use ozipdecrypt_core::crypto::{
+        self, derive_ofp_qc_key_iv, key_shuffle, swap_nibbles, OfpKeyTriplet,
+    };
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
 
@@ -501,6 +544,109 @@ mod tests {
         let ok = ozip::decrypt_file_v2(&key_bytes, None, &mut reader, &mut decrypted).unwrap();
         assert!(ok);
         assert_eq!(decrypted, original_data);
+    }
+
+    #[test]
+    fn test_ozip_selective_partition_extraction() {
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ozip_extract_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let ozip_file = temp_dir.join("firmware.ozip");
+        let out_dir = temp_dir.join("extracted");
+
+        let key_bytes = crypto::hex_to_bytes(crypto::DEFAULT_OZIP_KEYS[16]).unwrap();
+        let cipher = Aes128::new_from_slice(&key_bytes).unwrap();
+
+        let encrypt_v2 = |data: &[u8]| -> Vec<u8> {
+            let mut enc = Vec::new();
+            enc.extend_from_slice(b"OPPOENCRYPT!");
+            enc.extend_from_slice(&[0u8; 4]);
+            let bdsize_str = format!("{}", data.len());
+            let mut bdsize_field = [0u8; 16];
+            bdsize_field[..bdsize_str.len()].copy_from_slice(bdsize_str.as_bytes());
+            enc.extend_from_slice(&bdsize_field);
+            enc.extend_from_slice(&[0u8; 48]);
+            let mut offset = 0;
+            while offset < data.len() {
+                let chunk_end = std::cmp::min(offset + 0x4000, data.len());
+                let sub = &data[offset..chunk_end];
+                if sub.len() <= 16 {
+                    let mut b = [0u8; 16];
+                    b[..sub.len()].copy_from_slice(sub);
+                    let mut block = cipher::generic_array::GenericArray::clone_from_slice(&b);
+                    cipher.encrypt_block(&mut block);
+                    enc.extend_from_slice(&block[..sub.len()]);
+                } else {
+                    let mut block =
+                        cipher::generic_array::GenericArray::clone_from_slice(&sub[..16]);
+                    cipher.encrypt_block(&mut block);
+                    enc.extend_from_slice(&block);
+                    enc.extend_from_slice(&sub[16..]);
+                }
+                offset += 0x4000;
+            }
+            enc
+        };
+
+        let boot_data = b"ANDROID_BOOT_IMAGE_HEADER_TEST_KERNEL";
+        let modem_data = b"QUALCOMM_WLAN_MODEM_NVRAM_CALIBRATION_DATA";
+        {
+            let f = File::create(&ozip_file).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opt =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+            zw.start_file("boot.img", opt).unwrap();
+            zw.write_all(&encrypt_v2(boot_data)).unwrap();
+
+            zw.start_file("firmware-update/NON-HLOS.bin", opt).unwrap();
+            zw.write_all(&encrypt_v2(modem_data)).unwrap();
+
+            zw.start_file("system.img", opt).unwrap();
+            zw.write_all(b"UNENCRYPTED_SYSTEM_DATA").unwrap();
+
+            zw.finish().unwrap();
+        }
+
+        let key_config = crypto::KeyConfig::default();
+
+        // 1. Extract modem partition (should match NON-HLOS.bin)
+        let extracted =
+            ozip::extract_ozip_partition(&ozip_file, &out_dir, "modem", &key_config).unwrap();
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].file_name().unwrap(), "NON-HLOS.bin");
+        let content = std::fs::read(&extracted[0]).unwrap();
+        assert_eq!(content, modem_data);
+
+        // Assert system.img was not extracted
+        assert!(!out_dir.join("system.img").exists());
+
+        // 2. Extract wifi partition (should also match NON-HLOS.bin via alias)
+        let extracted_wifi =
+            ozip::extract_ozip_partition(&ozip_file, &out_dir, "wifi", &key_config).unwrap();
+        assert_eq!(extracted_wifi.len(), 1);
+        assert_eq!(extracted_wifi[0].file_name().unwrap(), "NON-HLOS.bin");
+
+        // 3. Test describe_container on this OZIP
+        let info = detect::describe_container(&ozip_file).unwrap();
+        assert_eq!(info.container_type, detect::ContainerType::Ozip);
+        assert_eq!(info.partitions.len(), 3);
+
+        // 4. Test non-existent partition error
+        assert!(
+            ozip::extract_ozip_partition(&ozip_file, &out_dir, "nonexistent", &key_config).is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

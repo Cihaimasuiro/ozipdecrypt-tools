@@ -1,9 +1,11 @@
+use crate::info::{ContainerInfo, PartitionMeta};
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContainerType {
     Ozip,
     OfpQualcomm,
@@ -24,12 +26,6 @@ impl std::fmt::Display for ContainerType {
             ContainerType::Unknown => write!(f, "Unknown Container / Unsupported Format"),
         }
     }
-}
-
-pub struct ContainerInfo {
-    pub container_type: ContainerType,
-    pub file_size: u64,
-    pub details: String,
 }
 
 pub fn detect_container(path: &Path) -> Result<ContainerType> {
@@ -226,9 +222,59 @@ pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
         }
     };
 
+    let mut partitions = Vec::new();
+    let mut chipset = None;
+
+    if container_type == ContainerType::Ozip || container_type == ContainerType::StandardZip {
+        if let Ok(file) = File::open(path) {
+            if let Ok(mut archive) = zip::ZipArchive::new(std::io::BufReader::new(file)) {
+                for i in 0..archive.len() {
+                    if let Ok(entry) = archive.by_index(i) {
+                        if !entry.is_dir() {
+                            let name = entry.name().unwrap_or_default().to_string();
+                            let size = entry.size();
+                            partitions.push(PartitionMeta {
+                                name,
+                                size,
+                                is_encrypted: container_type == ContainerType::Ozip,
+                                checksum: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    } else if container_type == ContainerType::OfpMediaTek && file_size > 0x6C {
+        if let Ok(mut f) = File::open(path) {
+            if f.seek(SeekFrom::Start(file_size - 0x6C)).is_ok() {
+                let mut hdr = [0u8; 0x6C];
+                if f.read_exact(&mut hdr).is_ok() {
+                    crate::ofp_mtk::mtk_shuffle(b"geyixue", &mut hdr);
+                    let prj = String::from_utf8_lossy(&hdr[0..46])
+                        .trim_matches('\0')
+                        .trim()
+                        .to_string();
+                    let cpu = String::from_utf8_lossy(&hdr[60..67])
+                        .trim_matches('\0')
+                        .trim()
+                        .to_string();
+                    if !cpu.is_empty() {
+                        chipset = Some(if !prj.is_empty() {
+                            format!("{} (Project: {})", cpu, prj)
+                        } else {
+                            cpu
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     Ok(ContainerInfo {
         container_type,
         file_size,
         details,
+        chipset,
+        partitions,
     })
 }

@@ -477,3 +477,230 @@ pub fn decrypt_file_v2<R: Read, W: Write>(
 
     Ok(true)
 }
+
+/// Selectively extract one or more partitions from an OZIP archive without repacking the entire ZIP.
+///
+/// If target_partition is "modem", it automatically matches "NON-HLOS.bin" or any entry containing "modem".
+/// If target_partition is "wifi" or "wlan", it automatically matches "NON-HLOS.bin" or any WLAN entry.
+pub fn extract_ozip_partition(
+    input_path: &Path,
+    out_dir: &Path,
+    target_partition: &str,
+    keys: &KeyConfig,
+) -> Result<Vec<std::path::PathBuf>> {
+    fs::create_dir_all(out_dir)?;
+    let mut file = File::open(input_path)
+        .with_context(|| format!("Unable to open {}", input_path.display()))?;
+
+    let mut magic = [0u8; 12];
+    file.read_exact(&mut magic)
+        .context("Input file is too short to be a valid OZIP archive.")?;
+
+    if &magic == OZIP_MAGIC {
+        bail!("Standalone single-file OZIP does not support selective partition extraction; please decrypt the full container.");
+    }
+    if &magic[0..2] != b"PK" {
+        bail!("Unknown magic header in OZIP: expected 'OPPOENCRYPT!' or 'PK'.");
+    }
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut archive = ZipArchive::new(BufReader::new(file))?;
+
+    let target_lower = target_partition.to_lowercase();
+    let matches_target = |entry_name: &str| -> bool {
+        let name_lower = entry_name.to_lowercase();
+        if target_lower == "modem" {
+            name_lower.contains("modem") || name_lower.contains("non-hlos")
+        } else if target_lower == "wifi" || target_lower == "wlan" {
+            name_lower.contains("non-hlos")
+                || name_lower.contains("wlan")
+                || name_lower.contains("wifi")
+        } else {
+            name_lower.contains(&target_lower)
+        }
+    };
+
+    let mut clist = HashSet::new();
+    let has_oppo_metadata = match archive.by_name("oppo_metadata") {
+        Ok(mut meta_entry) => {
+            let mut content = String::new();
+            if meta_entry.read_to_string(&mut content).is_ok() {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        clist.insert(trimmed.to_string());
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    };
+
+    let mut extracted = Vec::new();
+
+    if !has_oppo_metadata {
+        // Mode 2 extraction
+        println!(
+            "[*] Extracting partition '{}' from Mode 2 OZIP archive...",
+            target_partition
+        );
+        let mut key: Option<[u8; 16]> = None;
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i)?;
+            let name = entry.name()?.to_string();
+            if name.contains("boot.img") {
+                let mut m = [0u8; 12];
+                let n = read_full(&mut entry, &mut m)?;
+                if n == 12 && &m == OZIP_MAGIC {
+                    io::copy(&mut (&mut entry).take(68), &mut io::sink())?;
+                    let mut data = [0u8; 16];
+                    let n = read_full(&mut entry, &mut data)?;
+                    if n == 16 {
+                        if let Some(k) = keytest(&data, &keys.ozip_keys) {
+                            key = Some(k);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let key = key.context("No matching AES key found for Mode 2 archive.")?;
+        println!("[+] Matched AES decryption key for Mode 2 archive.");
+
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i)?;
+            if entry.is_dir() {
+                continue;
+            }
+            let orgfilename = entry.name()?.to_string();
+            if !matches_target(&orgfilename) {
+                continue;
+            }
+
+            let file_name = Path::new(&orgfilename).file_name().unwrap();
+            let dest_path = out_dir.join(file_name);
+            println!("[*] Extracting: {} -> {}", orgfilename, dest_path.display());
+
+            let mut out = File::create(&dest_path)?;
+            let mut m = [0u8; 12];
+            let n = read_full(&mut entry, &mut m)?;
+            if n == 12 && &m == OZIP_MAGIC {
+                if !decrypt_file_v2(&key, Some(&m), &mut entry, &mut out)? {
+                    bail!("Failed to decrypt chunk in {}", orgfilename);
+                }
+            } else {
+                if n > 0 {
+                    out.write_all(&m[..n])?;
+                }
+                io::copy(&mut entry, &mut out)?;
+            }
+            out.flush()?;
+            println!(
+                "  [+] Successfully extracted {} ({} bytes)",
+                file_name.to_string_lossy(),
+                dest_path.metadata()?.len()
+            );
+            extracted.push(dest_path);
+        }
+    } else {
+        // Mode 1 extraction
+        println!(
+            "[*] Extracting partition '{}' from Mode 1 OZIP archive...",
+            target_partition
+        );
+        let mut fname = String::new();
+        if clist.contains("firmware-update/vbmeta.img") {
+            fname = "firmware-update/vbmeta.img".to_string();
+        } else if clist.contains("vbmeta.img") {
+            fname = "vbmeta.img".to_string();
+        } else if archive.by_name("firmware-update/vbmeta.img").is_ok() {
+            fname = "firmware-update/vbmeta.img".to_string();
+        } else if archive.by_name("vbmeta.img").is_ok() {
+            fname = "vbmeta.img".to_string();
+        }
+        if fname.is_empty() {
+            bail!("Could not locate vbmeta.img to identify AES key in Mode 1 archive.");
+        }
+        let key = {
+            let mut vbmeta = archive.by_name(&fname)?;
+            io::copy(&mut (&mut vbmeta).take(0x1050), &mut io::sink())?;
+            let mut data = [0u8; 16];
+            let n = read_full(&mut vbmeta, &mut data)?;
+            if n < 16 {
+                bail!("vbmeta.img is too short to identify key.");
+            }
+            keytest(&data, &keys.ozip_keys)
+                .context("No matching AES key found for Mode 1 archive.")?
+        };
+        println!("[+] Matched AES decryption key for Mode 1 archive.");
+
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i)?;
+            if entry.is_dir() {
+                continue;
+            }
+            let orgfilename = entry.name()?.to_string();
+            if !matches_target(&orgfilename) {
+                continue;
+            }
+
+            let file_name = Path::new(&orgfilename).file_name().unwrap();
+            let dest_path = out_dir.join(file_name);
+            println!("[*] Extracting: {} -> {}", orgfilename, dest_path.display());
+
+            let file_size = entry.size();
+            let mut out = File::create(&dest_path)?;
+            if !clist.is_empty() {
+                if clist.contains(&orgfilename) {
+                    decrypt_file_v1(&key, None, &mut entry, file_size, &mut out)?;
+                } else {
+                    io::copy(&mut entry, &mut out)?;
+                }
+            } else {
+                let mut m = [0u8; 12];
+                let n = read_full(&mut entry, &mut m)?;
+                if n == 12 && &m == OZIP_MAGIC {
+                    decrypt_file_v1(&key, Some(&m), &mut entry, file_size, &mut out)?;
+                } else {
+                    if n > 0 {
+                        out.write_all(&m[..n])?;
+                    }
+                    io::copy(&mut entry, &mut out)?;
+                }
+            }
+            out.flush()?;
+            println!(
+                "  [+] Successfully extracted {} ({} bytes)",
+                file_name.to_string_lossy(),
+                dest_path.metadata()?.len()
+            );
+            extracted.push(dest_path);
+        }
+    }
+
+    if extracted.is_empty() {
+        let mut available = Vec::new();
+        for i in 0..std::cmp::min(archive.len(), 15) {
+            if let Ok(entry) = archive.by_index(i) {
+                if let Ok(name) = entry.name() {
+                    available.push(name.to_string());
+                }
+            }
+        }
+        bail!(
+            "No partition matching '{}' found in OZIP archive. Examples of files in this archive: {}",
+            target_partition,
+            available.join(", ")
+        );
+    }
+
+    println!(
+        "\n[+] Successfully extracted {} partition(s) to {}",
+        extracted.len(),
+        out_dir.display()
+    );
+    Ok(extracted)
+}

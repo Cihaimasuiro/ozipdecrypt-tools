@@ -1,3 +1,4 @@
+use crate::detect::ContainerType;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,7 +11,7 @@ pub struct PartitionMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerInfo {
-    pub container_type: String,
+    pub container_type: ContainerType,
     pub file_size: u64,
     pub details: String,
     pub chipset: Option<String>,
