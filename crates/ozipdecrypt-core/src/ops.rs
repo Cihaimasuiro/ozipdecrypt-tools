@@ -1,5 +1,8 @@
+use crate::error::OzipError;
+use crate::reporter::{ChecksumStatus, NoopReporter, ProgressEvent, ProgressReporter};
 use anyhow::{bail, Context, Result};
 use quick_xml::events::Event;
+
 use quick_xml::reader::Reader;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -257,6 +260,16 @@ pub struct OpsPartitionItem {
 }
 
 pub fn extract_ops(ops_path: &Path, out_dir: &Path, target_partition: Option<&str>) -> Result<()> {
+    extract_ops_with_reporter(ops_path, out_dir, target_partition, &NoopReporter)?;
+    Ok(())
+}
+
+pub fn extract_ops_with_reporter(
+    ops_path: &Path,
+    out_dir: &Path,
+    target_partition: Option<&str>,
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<(String, u64, ChecksumStatus)>> {
     fs::create_dir_all(out_dir)?;
     let mut file = File::open(ops_path)
         .with_context(|| format!("Failed to open OnePlus OPS archive: {}", ops_path.display()))?;
@@ -269,16 +282,11 @@ pub fn extract_ops(ops_path: &Path, out_dir: &Path, target_partition: Option<&st
 
     let settings_path = out_dir.join("settings.xml");
     fs::write(&settings_path, &xml_str)?;
-    println!(
-        "[+] Saved decrypted OPS manifest to {}",
-        settings_path.display()
-    );
 
     let items = parse_ops_xml(&xml_str)?;
-    println!("[+] Found {} partition items in OPS archive.", items.len());
 
-    let mut extracted_count = 0;
-    for item in &items {
+    let mut filtered_items = Vec::new();
+    for item in items {
         if let Some(target) = target_partition {
             let target_lower = target.to_lowercase();
             let file_lower = item.filename.to_lowercase();
@@ -286,91 +294,10 @@ pub fn extract_ops(ops_path: &Path, out_dir: &Path, target_partition: Option<&st
                 continue;
             }
         }
-
-        println!(
-            "[*] Extracting \"{}\" (size: {} bytes, encrypted: {})...",
-            item.filename, item.length, item.is_encrypted
-        );
-
-        let out_file_path = crate::crypto::safe_join(out_dir, &item.filename)?;
-        if let Some(parent) = out_file_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        file.seek(SeekFrom::Start(item.start))?;
-        let mut out = File::create(&out_file_path)
-            .with_context(|| format!("Failed to create {}", out_file_path.display()))?;
-
-        if item.is_encrypted {
-            let mut remaining = item.length;
-            let mut rkey = MASTER_KEY;
-            let chunk_size = 64 * 1024usize;
-            let mut in_buf = vec![0u8; chunk_size];
-            let is_whole_input_short = item.length < 16;
-            while remaining > 0 {
-                let to_read = std::cmp::min(remaining, chunk_size as u64) as usize;
-                file.read_exact(&mut in_buf[..to_read])?;
-                let (plain, next_rkey) = key_custom_decrypt_chunk(
-                    &in_buf[..to_read],
-                    rkey,
-                    matched_mbox,
-                    &sbox_bytes,
-                    is_whole_input_short,
-                );
-                out.write_all(&plain)?;
-                rkey = next_rkey;
-                remaining -= to_read as u64;
-            }
-        } else {
-            // Unencrypted stream copy
-            let mut remaining = item.length;
-            let mut buf = [0u8; 64 * 1024];
-            while remaining > 0 {
-                let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
-                let n = file.read(&mut buf[..to_read])?;
-                if n == 0 {
-                    break;
-                }
-                out.write_all(&buf[..n])?;
-                remaining -= n as u64;
-            }
-        }
-
-        out.flush()?;
-
-        // Verify SHA256 if present
-        if !item.sha256.is_empty() {
-            let mut f = File::open(&out_file_path)?;
-            let mut hasher = Sha256::new();
-            let mut buf = [0u8; 64 * 1024];
-            while let Ok(n) = f.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-            }
-            if item.length % 0x1000 > 0 {
-                let pad = 0x1000 - (item.length % 0x1000);
-                let zeroes = [0u8; 4096];
-                hasher.update(&zeroes[..pad as usize]);
-            }
-            let digest_str = format!("{:x}", hasher.finalize());
-            if digest_str.eq_ignore_ascii_case(&item.sha256) {
-                println!("  [+] Verified SHA-256 successfully.");
-            } else {
-                bail!(
-                    "SHA-256 verification failed for '{}'! Computed {}, expected {}",
-                    item.filename,
-                    digest_str,
-                    item.sha256
-                );
-            }
-        }
-
-        extracted_count += 1;
+        filtered_items.push(item);
     }
 
-    if extracted_count == 0 {
+    if filtered_items.is_empty() {
         if let Some(target) = target_partition {
             bail!("No OPS partition matching '{}' was found.", target);
         } else {
@@ -378,12 +305,160 @@ pub fn extract_ops(ops_path: &Path, out_dir: &Path, target_partition: Option<&st
         }
     }
 
-    println!(
-        "\n[+] Successfully extracted {} OnePlus partition(s) to {}",
-        extracted_count,
-        out_dir.display()
-    );
-    Ok(())
+    let total_bytes: u64 = filtered_items.iter().map(|it| it.length).sum();
+    reporter.on_event(ProgressEvent::Started {
+        total_items: filtered_items.len(),
+        total_bytes,
+    });
+
+    let mut cumulative_done = 0u64;
+    let mut results = Vec::new();
+
+    for item in &filtered_items {
+        if reporter.is_cancelled() {
+            return Err(OzipError::Cancelled.into());
+        }
+
+        reporter.on_event(ProgressEvent::ItemStarted {
+            name: item.filename.clone(),
+            size: item.length,
+        });
+
+        let out_file_path = crate::crypto::safe_join(out_dir, &item.filename)?;
+        if let (Ok(src_c), Ok(dst_c)) = (ops_path.canonicalize(), out_file_path.canonicalize()) {
+            if src_c == dst_c {
+                bail!(
+                    "Refusing to overwrite input archive: {}",
+                    ops_path.display()
+                );
+            }
+        }
+
+        if let Some(parent) = out_file_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let part_path = out_file_path.with_extension(format!(
+            "{}.part",
+            out_file_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+        ));
+
+        file.seek(SeekFrom::Start(item.start))?;
+
+        let write_res = (|| -> Result<ChecksumStatus> {
+            let mut out = File::create(&part_path)
+                .with_context(|| format!("Failed to create {}", part_path.display()))?;
+
+            if item.is_encrypted {
+                let mut remaining = item.length;
+                let mut rkey = MASTER_KEY;
+                let chunk_size = 64 * 1024usize;
+                let mut in_buf = vec![0u8; chunk_size];
+                let is_whole_input_short = item.length < 16;
+                while remaining > 0 {
+                    if reporter.is_cancelled() {
+                        return Err(OzipError::Cancelled.into());
+                    }
+                    let to_read = std::cmp::min(remaining, chunk_size as u64) as usize;
+                    file.read_exact(&mut in_buf[..to_read])?;
+                    let (plain, next_rkey) = key_custom_decrypt_chunk(
+                        &in_buf[..to_read],
+                        rkey,
+                        matched_mbox,
+                        &sbox_bytes,
+                        is_whole_input_short,
+                    );
+                    out.write_all(&plain)?;
+                    rkey = next_rkey;
+                    remaining -= to_read as u64;
+                    cumulative_done += to_read as u64;
+                    reporter.on_event(ProgressEvent::Progress {
+                        bytes_done: cumulative_done,
+                        bytes_total: total_bytes,
+                    });
+                }
+            } else {
+                // Unencrypted stream copy
+                let mut remaining = item.length;
+                let mut buf = [0u8; 64 * 1024];
+                while remaining > 0 {
+                    if reporter.is_cancelled() {
+                        return Err(OzipError::Cancelled.into());
+                    }
+                    let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
+                    let n = file.read(&mut buf[..to_read])?;
+                    if n == 0 {
+                        break;
+                    }
+                    out.write_all(&buf[..n])?;
+                    remaining -= n as u64;
+                    cumulative_done += n as u64;
+                    reporter.on_event(ProgressEvent::Progress {
+                        bytes_done: cumulative_done,
+                        bytes_total: total_bytes,
+                    });
+                }
+            }
+
+            out.flush()?;
+            drop(out);
+
+            // Verify SHA256 if present
+            let chk_status = if !item.sha256.is_empty() {
+                let mut f = File::open(&part_path)?;
+                let mut hasher = Sha256::new();
+                let mut buf = [0u8; 64 * 1024];
+                while let Ok(n) = f.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                if item.length % 0x1000 > 0 {
+                    let pad = 0x1000 - (item.length % 0x1000);
+                    let zeroes = [0u8; 4096];
+                    hasher.update(&zeroes[..pad as usize]);
+                }
+                let digest_str = format!("{:x}", hasher.finalize());
+                if digest_str.eq_ignore_ascii_case(&item.sha256) {
+                    ChecksumStatus::VerifiedFull
+                } else {
+                    bail!(
+                        "SHA-256 verification failed for '{}'! Computed {}, expected {}",
+                        item.filename,
+                        digest_str,
+                        item.sha256
+                    );
+                }
+            } else {
+                ChecksumStatus::NoHashInManifest
+            };
+
+            fs::rename(&part_path, &out_file_path)?;
+            Ok(chk_status)
+        })();
+
+        let chk_status = match write_res {
+            Ok(st) => st,
+            Err(e) => {
+                let _ = fs::remove_file(&part_path);
+                return Err(e);
+            }
+        };
+
+        reporter.on_event(ProgressEvent::ItemDone {
+            name: item.filename.clone(),
+            checksum: chk_status,
+        });
+
+        results.push((item.filename.clone(), item.length, chk_status));
+    }
+
+    reporter.on_event(ProgressEvent::Finished);
+    Ok(results)
 }
 
 #[allow(clippy::manual_is_multiple_of)]
@@ -415,10 +490,9 @@ pub(crate) fn extract_ops_xml(
     let mut enc_xml = vec![0u8; (xml_length + xml_pad) as usize];
     file.read_exact(&mut enc_xml)?;
 
-    for (name, mbox) in &[("MBox5", &MBOX5), ("MBox6", &MBOX6), ("MBox4", &MBOX4)] {
+    for (_name, mbox) in &[("MBox5", &MBOX5), ("MBox6", &MBOX6), ("MBox4", &MBOX4)] {
         let dec = key_custom_decrypt(&enc_xml, MASTER_KEY, *mbox, sbox);
         if dec.windows(4).any(|w| w == b"xml " || w == b"<?xm") {
-            println!("[+] Matched OnePlus OPS profile: {}", name);
             let s = String::from_utf8_lossy(&dec[..xml_length as usize]).to_string();
             return Ok((s, *mbox));
         }

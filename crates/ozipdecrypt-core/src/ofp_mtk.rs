@@ -1,3 +1,5 @@
+use crate::error::OzipError;
+use crate::reporter::{ChecksumStatus, NoopReporter, ProgressEvent, ProgressReporter};
 use aes::Aes128;
 use anyhow::{bail, Context, Result};
 use cfb_mode::cipher::{AsyncStreamCipher, KeyIvInit};
@@ -140,6 +142,16 @@ pub fn extract_ofp_mtk(
     out_dir: &Path,
     target_partition: Option<&str>,
 ) -> Result<()> {
+    extract_ofp_mtk_with_reporter(ofp_path, out_dir, target_partition, &NoopReporter)?;
+    Ok(())
+}
+
+pub fn extract_ofp_mtk_with_reporter(
+    ofp_path: &Path,
+    out_dir: &Path,
+    target_partition: Option<&str>,
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<(String, u64, ChecksumStatus)>> {
     fs::create_dir_all(out_dir)?;
     let mut file = File::open(ofp_path).with_context(|| {
         format!(
@@ -151,7 +163,6 @@ pub fn extract_ofp_mtk(
 
     let (aes_key, aes_iv) =
         brute_mtk_key(&mut file).context("Failed to detect MediaTek OFP AES key.")?;
-    println!("[+] Matched MediaTek OFP AES key.");
 
     let hdr_key = b"geyixue";
     let hdr_length = 0x6Cu64;
@@ -165,45 +176,7 @@ pub fn extract_ofp_mtk(
     file.read_exact(&mut hdr)?;
     mtk_shuffle(hdr_key, &mut hdr);
 
-    // Unpack C-struct with alignment:
-    // 0..46: prjname
-    // 48..56: unknownval (u64)
-    // 56..60: reserved (4s)
-    // 60..67: cpu (7s)
-    // 67..72: flashtype (5s)
-    // 72..74: hdr2entries (u16)
-    // 74..106: prjinfo (32s)
-    // 106..108: crc (u16)
-    let prjname = String::from_utf8_lossy(&hdr[0..46])
-        .trim_matches('\0')
-        .trim()
-        .to_string();
-    let cpu = String::from_utf8_lossy(&hdr[60..67])
-        .trim_matches('\0')
-        .trim()
-        .to_string();
-    let flashtype = String::from_utf8_lossy(&hdr[67..72])
-        .trim_matches('\0')
-        .trim()
-        .to_string();
     let hdr2entries = u16::from_le_bytes(hdr[72..74].try_into().unwrap()) as u64;
-    let prjinfo = String::from_utf8_lossy(&hdr[74..106])
-        .trim_matches('\0')
-        .trim()
-        .to_string();
-
-    if !prjname.is_empty() {
-        println!("[+] Detected Project: {}", prjname);
-    }
-    if !cpu.is_empty() {
-        println!("[+] Detected SoC/CPU: {}", cpu);
-    }
-    if !flashtype.is_empty() {
-        println!("[+] Detected Flash Type: {}", flashtype);
-    }
-    if !prjinfo.is_empty() {
-        println!("[+] Project Info: {}", prjinfo);
-    }
 
     let hdr2_length = hdr2entries * 0x60;
     if file_size < hdr2_length + hdr_length {
@@ -244,13 +217,8 @@ pub fn extract_ofp_mtk(
         }
     }
 
-    println!(
-        "[+] Found {} partitions in MediaTek OFP archive.",
-        entries.len()
-    );
-
-    let mut extracted_count = 0;
-    for entry in &entries {
+    let mut filtered_entries = Vec::new();
+    for entry in entries {
         if let Some(target) = target_partition {
             let target_lower = target.to_lowercase();
             let name_lower = entry.name.to_lowercase();
@@ -259,13 +227,46 @@ pub fn extract_ofp_mtk(
                 continue;
             }
         }
+        filtered_entries.push(entry);
+    }
 
-        println!(
-            "[*] Writing \"{}\" as \"{}\" (size: {} bytes, enc: {} bytes)...",
-            entry.name, entry.filename, entry.length, entry.enc_length
-        );
+    if filtered_entries.is_empty() {
+        if let Some(target) = target_partition {
+            bail!("No MediaTek partition matching '{}' was found.", target);
+        } else {
+            bail!("No extractable partitions found in MediaTek OFP archive.");
+        }
+    }
+
+    let total_bytes: u64 = filtered_entries.iter().map(|e| e.length).sum();
+    reporter.on_event(ProgressEvent::Started {
+        total_items: filtered_entries.len(),
+        total_bytes,
+    });
+
+    let mut cumulative_done = 0u64;
+    let mut results = Vec::new();
+
+    for entry in &filtered_entries {
+        if reporter.is_cancelled() {
+            return Err(OzipError::Cancelled.into());
+        }
+
+        reporter.on_event(ProgressEvent::ItemStarted {
+            name: entry.filename.clone(),
+            size: entry.length,
+        });
 
         let out_file_path = crate::crypto::safe_join(out_dir, &entry.filename)?;
+        if let (Ok(src_c), Ok(dst_c)) = (ofp_path.canonicalize(), out_file_path.canonicalize()) {
+            if src_c == dst_c {
+                bail!(
+                    "Refusing to overwrite input archive: {}",
+                    ofp_path.display()
+                );
+            }
+        }
+
         if let Some(parent) = out_file_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -279,60 +280,87 @@ pub fn extract_ofp_mtk(
             );
         }
 
-        let mut out = File::create(&out_file_path)
-            .with_context(|| format!("Failed to create {}", out_file_path.display()))?;
+        let part_path = out_file_path.with_extension(format!(
+            "{}.part",
+            out_file_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+        ));
 
-        file.seek(SeekFrom::Start(entry.start))?;
-        let mut remaining_len = entry.length;
+        let write_res = (|| -> Result<()> {
+            let mut out = File::create(&part_path)?;
+            file.seek(SeekFrom::Start(entry.start))?;
+            let mut remaining_len = entry.length;
 
-        if entry.enc_length > 0 {
-            let mut enc_data = vec![0u8; entry.enc_length as usize];
-            file.read_exact(&mut enc_data)?;
+            if entry.enc_length > 0 {
+                let mut enc_data = vec![0u8; entry.enc_length as usize];
+                file.read_exact(&mut enc_data)?;
 
-            // AES CFB pad to 16 bytes if not divisible by 16
-            let padded_len = if entry.enc_length % 16 != 0 {
-                (entry.enc_length + (16 - (entry.enc_length % 16))) as usize
-            } else {
-                entry.enc_length as usize
-            };
-            let mut pad_buf = enc_data.clone();
-            pad_buf.resize(padded_len, 0u8);
+                // AES CFB pad to 16 bytes if not divisible by 16
+                let padded_len = if entry.enc_length % 16 != 0 {
+                    (entry.enc_length + (16 - (entry.enc_length % 16))) as usize
+                } else {
+                    entry.enc_length as usize
+                };
+                let mut pad_buf = enc_data.clone();
+                pad_buf.resize(padded_len, 0u8);
 
-            let cipher = Aes128Cfb::new(&aes_key.into(), &aes_iv.into());
-            cipher.decrypt(&mut pad_buf);
+                let cipher = Aes128Cfb::new(&aes_key.into(), &aes_iv.into());
+                cipher.decrypt(&mut pad_buf);
 
-            out.write_all(&pad_buf[..entry.enc_length as usize])?;
-            remaining_len = remaining_len.saturating_sub(entry.enc_length);
-        }
-
-        // Stream remaining plain partition payload in 2 MB blocks
-        let mut buf = vec![0u8; 2 * 1024 * 1024];
-        while remaining_len > 0 {
-            let to_read = std::cmp::min(remaining_len, buf.len() as u64) as usize;
-            let n = file.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
+                out.write_all(&pad_buf[..entry.enc_length as usize])?;
+                remaining_len = remaining_len.saturating_sub(entry.enc_length);
+                cumulative_done += entry.enc_length;
+                reporter.on_event(ProgressEvent::Progress {
+                    bytes_done: cumulative_done,
+                    bytes_total: total_bytes,
+                });
             }
-            out.write_all(&buf[..n])?;
-            remaining_len -= n as u64;
+
+            // Stream remaining plain partition payload in 64 KB blocks for responsiveness
+            let mut buf = vec![0u8; 64 * 1024];
+            while remaining_len > 0 {
+                if reporter.is_cancelled() {
+                    return Err(OzipError::Cancelled.into());
+                }
+                let to_read = std::cmp::min(remaining_len, buf.len() as u64) as usize;
+                let n = file.read(&mut buf[..to_read])?;
+                if n == 0 {
+                    break;
+                }
+                out.write_all(&buf[..n])?;
+                remaining_len -= n as u64;
+                cumulative_done += n as u64;
+                reporter.on_event(ProgressEvent::Progress {
+                    bytes_done: cumulative_done,
+                    bytes_total: total_bytes,
+                });
+            }
+
+            out.flush()?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_res {
+            let _ = fs::remove_file(&part_path);
+            return Err(e);
         }
 
-        out.flush()?;
-        extracted_count += 1;
+        fs::rename(&part_path, &out_file_path)?;
+
+        reporter.on_event(ProgressEvent::ItemDone {
+            name: entry.filename.clone(),
+            checksum: ChecksumStatus::NoHashInManifest,
+        });
+
+        results.push((
+            entry.filename.clone(),
+            entry.length,
+            ChecksumStatus::NoHashInManifest,
+        ));
     }
 
-    if extracted_count == 0 {
-        if let Some(target) = target_partition {
-            bail!("No MediaTek partition matching '{}' was found.", target);
-        } else {
-            bail!("No extractable partitions found in MediaTek OFP archive.");
-        }
-    }
-
-    println!(
-        "\n[+] Successfully decrypted and extracted {} MediaTek partition(s) to {}",
-        extracted_count,
-        out_dir.display()
-    );
-    Ok(())
+    reporter.on_event(ProgressEvent::Finished);
+    Ok(results)
 }

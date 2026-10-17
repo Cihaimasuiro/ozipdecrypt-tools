@@ -1,11 +1,13 @@
 use crate::crypto::{decrypt_block, decrypt_blocks, keytest, KeyConfig};
+use crate::error::OzipError;
+use crate::reporter::{ChecksumStatus, NoopReporter, ProgressEvent, ProgressReporter};
 use aes::cipher::KeyInit;
 use aes::Aes128;
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
@@ -25,6 +27,15 @@ pub fn read_full<R: Read>(reader: &mut R, mut buf: &mut [u8]) -> io::Result<usiz
 }
 
 pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> Result<()> {
+    decrypt_ozip_with_reporter(input_path, output_path, keys, &NoopReporter)
+}
+
+pub fn decrypt_ozip_with_reporter(
+    input_path: &Path,
+    output_path: &Path,
+    keys: &KeyConfig,
+    reporter: &dyn ProgressReporter,
+) -> Result<()> {
     if input_path == output_path {
         bail!(
             "Input and output paths are identical ({}). Refusing to run to prevent destroying input archive.",
@@ -40,7 +51,6 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
         }
     }
 
-    println!("[*] Opening OZIP archive: {}", input_path.display());
     let mut file = File::open(input_path)
         .with_context(|| format!("Unable to open {}", input_path.display()))?;
 
@@ -83,12 +93,14 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
         let mut fr = BufReader::new(file);
 
         fr.seek(SeekFrom::Start(0x1050))?;
-        println!("[*] Streaming decryption to {}...", output_path.display());
 
         let mut block = [0u8; 16];
         let mut plain = [0u8; 0x4000];
 
         loop {
+            if reporter.is_cancelled() {
+                return Err(OzipError::Cancelled.into());
+            }
             let n = read_full(&mut fr, &mut block)?;
             if n == 0 {
                 break;
@@ -112,14 +124,10 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
         let mut archive = match ZipArchive::new(BufReader::new(file)) {
             Ok(a) => a,
             Err(_) => {
-                decrypt_mode2(input_path, &tmp_output, keys)?;
+                decrypt_mode2_with_reporter(input_path, &tmp_output, keys, reporter)?;
                 if tmp_output.exists() {
                     fs::rename(&tmp_output, output_path)?;
                 }
-                println!(
-                    "[+] DONE! Successfully decrypted Mode 2 OZIP to {}",
-                    output_path.display()
-                );
                 return Ok(());
             }
         };
@@ -144,15 +152,10 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
         };
 
         if !has_oppo_metadata {
-            println!("[*] No oppo_metadata detected, attempting Zip Mode 2 (CPH1803/CPH1901)...");
-            decrypt_mode2(input_path, &tmp_output, keys)?;
+            decrypt_mode2_with_reporter(input_path, &tmp_output, keys, reporter)?;
             if tmp_output.exists() {
                 fs::rename(&tmp_output, output_path)?;
             }
-            println!(
-                "[+] DONE! Successfully decrypted Mode 2 OZIP to {}",
-                output_path.display()
-            );
             return Ok(());
         }
 
@@ -194,9 +197,12 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
             .large_file(true);
 
         for i in 0..archive.len() {
+            if reporter.is_cancelled() {
+                return Err(OzipError::Cancelled.into());
+            }
+
             let mut entry = archive.by_index(i)?;
             let orgfilename = entry.name()?.to_string();
-            println!("[*] Extracting {}", orgfilename);
 
             if entry.is_dir() {
                 writer.add_directory(&orgfilename, pass_options)?;
@@ -206,9 +212,15 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
             let file_size = entry.size();
             if !clist.is_empty() {
                 if clist.contains(&orgfilename) {
-                    println!("[+] Decrypting {}", orgfilename);
                     writer.start_file(&orgfilename, decrypt_options)?;
-                    decrypt_file_v1(&key, None, &mut entry, file_size, &mut writer)?;
+                    decrypt_file_v1_with_reporter(
+                        &key,
+                        None,
+                        &mut entry,
+                        file_size,
+                        &mut writer,
+                        reporter,
+                    )?;
                 } else {
                     writer.start_file(&orgfilename, pass_options)?;
                     io::copy(&mut entry, &mut writer)?;
@@ -217,9 +229,15 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
                 let mut magic = [0u8; 12];
                 let n = read_full(&mut entry, &mut magic)?;
                 if n == 12 && &magic == OZIP_MAGIC {
-                    println!("[+] Decrypting {}", orgfilename);
                     writer.start_file(&orgfilename, decrypt_options)?;
-                    decrypt_file_v1(&key, Some(&magic), &mut entry, file_size, &mut writer)?;
+                    decrypt_file_v1_with_reporter(
+                        &key,
+                        Some(&magic),
+                        &mut entry,
+                        file_size,
+                        &mut writer,
+                        reporter,
+                    )?;
                 } else {
                     writer.start_file(&orgfilename, pass_options)?;
                     if n > 0 {
@@ -245,10 +263,6 @@ pub fn decrypt_ozip(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> 
                     )
                 })?;
             }
-            println!(
-                "[+] DONE! Successfully decrypted OZIP to {}",
-                output_path.display()
-            );
             Ok(())
         }
         Err(e) => {
@@ -266,6 +280,17 @@ pub fn decrypt_file_v1<R: Read, W: Write>(
     reader: &mut R,
     file_size: u64,
     writer: &mut W,
+) -> Result<()> {
+    decrypt_file_v1_with_reporter(key, initial_magic, reader, file_size, writer, &NoopReporter)
+}
+
+pub fn decrypt_file_v1_with_reporter<R: Read, W: Write>(
+    key: &[u8; 16],
+    initial_magic: Option<&[u8; 12]>,
+    reader: &mut R,
+    file_size: u64,
+    writer: &mut W,
+    reporter: &dyn ProgressReporter,
 ) -> Result<()> {
     let cipher = Aes128::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("Failed to initialize AES cipher: {}", e))?;
@@ -290,6 +315,9 @@ pub fn decrypt_file_v1<R: Read, W: Write>(
     let mut buf = [0u8; 0x4000];
 
     while dsize > 0 {
+        if reporter.is_cancelled() {
+            return Err(OzipError::Cancelled.into());
+        }
         let size = std::cmp::min(flen, 0x4000) as usize;
         if size == 0 {
             break;
@@ -309,10 +337,15 @@ pub fn decrypt_file_v1<R: Read, W: Write>(
 }
 
 pub fn decrypt_mode2(input_path: &Path, output_path: &Path, keys: &KeyConfig) -> Result<()> {
-    println!(
-        "[*] Finding key for Mode 2 archive: {}",
-        input_path.display()
-    );
+    decrypt_mode2_with_reporter(input_path, output_path, keys, &NoopReporter)
+}
+
+pub fn decrypt_mode2_with_reporter(
+    input_path: &Path,
+    output_path: &Path,
+    keys: &KeyConfig,
+    reporter: &dyn ProgressReporter,
+) -> Result<()> {
     let file = File::open(input_path)?;
     let mut archive = ZipArchive::new(BufReader::new(file))?;
 
@@ -340,7 +373,6 @@ pub fn decrypt_mode2(input_path: &Path, output_path: &Path, keys: &KeyConfig) ->
     }
 
     let key = key.context("No matching AES key found for Mode 2 archive.")?;
-    println!("[*] Extracting and decrypting Mode 2 archive...");
 
     let out_file = File::create(output_path)?;
     let mut writer = ZipWriter::new(BufWriter::new(out_file));
@@ -352,6 +384,10 @@ pub fn decrypt_mode2(input_path: &Path, output_path: &Path, keys: &KeyConfig) ->
         .large_file(true);
 
     for i in 0..archive.len() {
+        if reporter.is_cancelled() {
+            return Err(OzipError::Cancelled.into());
+        }
+
         let mut entry = archive.by_index(i)?;
         let orgfilename = entry.name()?.to_string();
 
@@ -363,9 +399,14 @@ pub fn decrypt_mode2(input_path: &Path, output_path: &Path, keys: &KeyConfig) ->
         let mut magic = [0u8; 12];
         let n = read_full(&mut entry, &mut magic)?;
         if n == 12 && &magic == OZIP_MAGIC {
-            println!("[+] Decrypting {}", orgfilename);
             writer.start_file(&orgfilename, decrypt_options)?;
-            if !decrypt_file_v2(&key, Some(&magic), &mut entry, &mut writer)? {
+            if !decrypt_file_v2_with_reporter(
+                &key,
+                Some(&magic),
+                &mut entry,
+                &mut writer,
+                reporter,
+            )? {
                 bail!("Failed to decrypt chunk in {}", orgfilename);
             }
         } else {
@@ -378,10 +419,6 @@ pub fn decrypt_mode2(input_path: &Path, output_path: &Path, keys: &KeyConfig) ->
     }
 
     writer.finish()?;
-    println!(
-        "[+] DONE! Successfully decrypted Mode 2 OZIP to {}",
-        output_path.display()
-    );
     Ok(())
 }
 
@@ -390,6 +427,16 @@ pub fn decrypt_file_v2<R: Read, W: Write>(
     initial_header: Option<&[u8; 12]>,
     reader: &mut R,
     writer: &mut W,
+) -> Result<bool> {
+    decrypt_file_v2_with_reporter(key, initial_header, reader, writer, &NoopReporter)
+}
+
+pub fn decrypt_file_v2_with_reporter<R: Read, W: Write>(
+    key: &[u8; 16],
+    initial_header: Option<&[u8; 12]>,
+    reader: &mut R,
+    writer: &mut W,
+    reporter: &dyn ProgressReporter,
 ) -> Result<bool> {
     let cipher = Aes128::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("Failed to initialize AES cipher: {}", e))?;
@@ -401,6 +448,10 @@ pub fn decrypt_file_v2<R: Read, W: Write>(
     let mut plain_buf = [0u8; 0x3FF0];
 
     while goon {
+        if reporter.is_cancelled() {
+            return Err(OzipError::Cancelled.into());
+        }
+
         let header = if is_first_block {
             is_first_block = false;
             if let Some(h) = initial_header {
@@ -454,6 +505,9 @@ pub fn decrypt_file_v2<R: Read, W: Write>(
         }
 
         while bdsize > 0 {
+            if reporter.is_cancelled() {
+                return Err(OzipError::Cancelled.into());
+            }
             let n1 = read_full(reader, &mut block16)?;
             if n1 == 0 {
                 break;
@@ -479,15 +533,29 @@ pub fn decrypt_file_v2<R: Read, W: Write>(
 }
 
 /// Selectively extract one or more partitions from an OZIP archive without repacking the entire ZIP.
-///
-/// If target_partition is "modem", it automatically matches "NON-HLOS.bin" or any entry containing "modem".
-/// If target_partition is "wifi" or "wlan", it automatically matches "NON-HLOS.bin" or any WLAN entry.
 pub fn extract_ozip_partition(
     input_path: &Path,
     out_dir: &Path,
     target_partition: &str,
     keys: &KeyConfig,
-) -> Result<Vec<std::path::PathBuf>> {
+) -> Result<Vec<PathBuf>> {
+    let items = extract_ozip_partition_with_reporter(
+        input_path,
+        out_dir,
+        target_partition,
+        keys,
+        &NoopReporter,
+    )?;
+    Ok(items.into_iter().map(|(n, _, _)| out_dir.join(n)).collect())
+}
+
+pub fn extract_ozip_partition_with_reporter(
+    input_path: &Path,
+    out_dir: &Path,
+    target_partition: &str,
+    keys: &KeyConfig,
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<(String, u64, ChecksumStatus)>> {
     fs::create_dir_all(out_dir)?;
     let mut file = File::open(input_path)
         .with_context(|| format!("Unable to open {}", input_path.display()))?;
@@ -539,14 +607,10 @@ pub fn extract_ozip_partition(
         Err(_) => false,
     };
 
-    let mut extracted = Vec::new();
+    let mut results = Vec::new();
 
     if !has_oppo_metadata {
         // Mode 2 extraction
-        println!(
-            "[*] Extracting partition '{}' from Mode 2 OZIP archive...",
-            target_partition
-        );
         let mut key: Option<[u8; 16]> = None;
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i)?;
@@ -568,9 +632,12 @@ pub fn extract_ozip_partition(
             }
         }
         let key = key.context("No matching AES key found for Mode 2 archive.")?;
-        println!("[+] Matched AES decryption key for Mode 2 archive.");
 
         for i in 0..archive.len() {
+            if reporter.is_cancelled() {
+                return Err(OzipError::Cancelled.into());
+            }
+
             let mut entry = archive.by_index(i)?;
             if entry.is_dir() {
                 continue;
@@ -582,35 +649,61 @@ pub fn extract_ozip_partition(
 
             let file_name = Path::new(&orgfilename).file_name().unwrap();
             let dest_path = out_dir.join(file_name);
-            println!("[*] Extracting: {} -> {}", orgfilename, dest_path.display());
+            let part_path = dest_path.with_extension(format!(
+                "{}.part",
+                dest_path.extension().and_then(|s| s.to_str()).unwrap_or("")
+            ));
 
-            let mut out = File::create(&dest_path)?;
-            let mut m = [0u8; 12];
-            let n = read_full(&mut entry, &mut m)?;
-            if n == 12 && &m == OZIP_MAGIC {
-                if !decrypt_file_v2(&key, Some(&m), &mut entry, &mut out)? {
-                    bail!("Failed to decrypt chunk in {}", orgfilename);
+            reporter.on_event(ProgressEvent::ItemStarted {
+                name: file_name.to_string_lossy().to_string(),
+                size: entry.size(),
+            });
+
+            let write_res = (|| -> Result<()> {
+                let mut out = File::create(&part_path)?;
+                let mut m = [0u8; 12];
+                let n = read_full(&mut entry, &mut m)?;
+                if n == 12 && &m == OZIP_MAGIC {
+                    if !decrypt_file_v2_with_reporter(
+                        &key,
+                        Some(&m),
+                        &mut entry,
+                        &mut out,
+                        reporter,
+                    )? {
+                        bail!("Failed to decrypt chunk in {}", orgfilename);
+                    }
+                } else {
+                    if n > 0 {
+                        out.write_all(&m[..n])?;
+                    }
+                    io::copy(&mut entry, &mut out)?;
                 }
-            } else {
-                if n > 0 {
-                    out.write_all(&m[..n])?;
-                }
-                io::copy(&mut entry, &mut out)?;
+                out.flush()?;
+                Ok(())
+            })();
+
+            if let Err(e) = write_res {
+                let _ = fs::remove_file(&part_path);
+                return Err(e);
             }
-            out.flush()?;
-            println!(
-                "  [+] Successfully extracted {} ({} bytes)",
-                file_name.to_string_lossy(),
-                dest_path.metadata()?.len()
-            );
-            extracted.push(dest_path);
+
+            fs::rename(&part_path, &dest_path)?;
+            let final_size = dest_path.metadata()?.len();
+
+            reporter.on_event(ProgressEvent::ItemDone {
+                name: file_name.to_string_lossy().to_string(),
+                checksum: ChecksumStatus::NoHashInManifest,
+            });
+
+            results.push((
+                file_name.to_string_lossy().to_string(),
+                final_size,
+                ChecksumStatus::NoHashInManifest,
+            ));
         }
     } else {
         // Mode 1 extraction
-        println!(
-            "[*] Extracting partition '{}' from Mode 1 OZIP archive...",
-            target_partition
-        );
         let mut fname = String::new();
         if clist.contains("firmware-update/vbmeta.img") {
             fname = "firmware-update/vbmeta.img".to_string();
@@ -635,9 +728,12 @@ pub fn extract_ozip_partition(
             keytest(&data, &keys.ozip_keys)
                 .context("No matching AES key found for Mode 1 archive.")?
         };
-        println!("[+] Matched AES decryption key for Mode 1 archive.");
 
         for i in 0..archive.len() {
+            if reporter.is_cancelled() {
+                return Err(OzipError::Cancelled.into());
+            }
+
             let mut entry = archive.by_index(i)?;
             if entry.is_dir() {
                 continue;
@@ -649,39 +745,73 @@ pub fn extract_ozip_partition(
 
             let file_name = Path::new(&orgfilename).file_name().unwrap();
             let dest_path = out_dir.join(file_name);
-            println!("[*] Extracting: {} -> {}", orgfilename, dest_path.display());
+            let part_path = dest_path.with_extension(format!(
+                "{}.part",
+                dest_path.extension().and_then(|s| s.to_str()).unwrap_or("")
+            ));
 
             let file_size = entry.size();
-            let mut out = File::create(&dest_path)?;
-            if !clist.is_empty() {
-                if clist.contains(&orgfilename) {
-                    decrypt_file_v1(&key, None, &mut entry, file_size, &mut out)?;
-                } else {
-                    io::copy(&mut entry, &mut out)?;
-                }
-            } else {
-                let mut m = [0u8; 12];
-                let n = read_full(&mut entry, &mut m)?;
-                if n == 12 && &m == OZIP_MAGIC {
-                    decrypt_file_v1(&key, Some(&m), &mut entry, file_size, &mut out)?;
-                } else {
-                    if n > 0 {
-                        out.write_all(&m[..n])?;
+
+            reporter.on_event(ProgressEvent::ItemStarted {
+                name: file_name.to_string_lossy().to_string(),
+                size: file_size,
+            });
+
+            let write_res = (|| -> Result<()> {
+                let mut out = File::create(&part_path)?;
+                if !clist.is_empty() {
+                    if clist.contains(&orgfilename) {
+                        decrypt_file_v1_with_reporter(
+                            &key, None, &mut entry, file_size, &mut out, reporter,
+                        )?;
+                    } else {
+                        io::copy(&mut entry, &mut out)?;
                     }
-                    io::copy(&mut entry, &mut out)?;
+                } else {
+                    let mut m = [0u8; 12];
+                    let n = read_full(&mut entry, &mut m)?;
+                    if n == 12 && &m == OZIP_MAGIC {
+                        decrypt_file_v1_with_reporter(
+                            &key,
+                            Some(&m),
+                            &mut entry,
+                            file_size,
+                            &mut out,
+                            reporter,
+                        )?;
+                    } else {
+                        if n > 0 {
+                            out.write_all(&m[..n])?;
+                        }
+                        io::copy(&mut entry, &mut out)?;
+                    }
                 }
+                out.flush()?;
+                Ok(())
+            })();
+
+            if let Err(e) = write_res {
+                let _ = fs::remove_file(&part_path);
+                return Err(e);
             }
-            out.flush()?;
-            println!(
-                "  [+] Successfully extracted {} ({} bytes)",
-                file_name.to_string_lossy(),
-                dest_path.metadata()?.len()
-            );
-            extracted.push(dest_path);
+
+            fs::rename(&part_path, &dest_path)?;
+            let final_size = dest_path.metadata()?.len();
+
+            reporter.on_event(ProgressEvent::ItemDone {
+                name: file_name.to_string_lossy().to_string(),
+                checksum: ChecksumStatus::NoHashInManifest,
+            });
+
+            results.push((
+                file_name.to_string_lossy().to_string(),
+                final_size,
+                ChecksumStatus::NoHashInManifest,
+            ));
         }
     }
 
-    if extracted.is_empty() {
+    if results.is_empty() {
         let mut available = Vec::new();
         for i in 0..std::cmp::min(archive.len(), 15) {
             if let Ok(entry) = archive.by_index(i) {
@@ -697,10 +827,5 @@ pub fn extract_ozip_partition(
         );
     }
 
-    println!(
-        "\n[+] Successfully extracted {} partition(s) to {}",
-        extracted.len(),
-        out_dir.display()
-    );
-    Ok(extracted)
+    Ok(results)
 }

@@ -1,4 +1,6 @@
 use crate::crypto::{derive_ofp_qc_key_iv, KeyConfig};
+use crate::error::OzipError;
+use crate::reporter::{ChecksumStatus, NoopReporter, ProgressEvent, ProgressReporter};
 use aes::Aes128;
 use anyhow::{bail, Context, Result};
 use cfb_mode::cipher::{AsyncStreamCipher, KeyIvInit};
@@ -34,6 +36,17 @@ pub fn extract_ofp_partition(
     target_partition: Option<&str>,
     keys: &KeyConfig,
 ) -> Result<()> {
+    extract_ofp_partition_with_reporter(ofp_path, out_dir, target_partition, keys, &NoopReporter)?;
+    Ok(())
+}
+
+pub fn extract_ofp_partition_with_reporter(
+    ofp_path: &Path,
+    out_dir: &Path,
+    target_partition: Option<&str>,
+    keys: &KeyConfig,
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<(String, u64, ChecksumStatus)>> {
     fs::create_dir_all(out_dir)?;
     let mut file = File::open(ofp_path)
         .with_context(|| format!("Failed to open OFP file: {}", ofp_path.display()))?;
@@ -42,8 +55,7 @@ pub fn extract_ofp_partition(
     // Check if the file is a password-protected ZIP container (Realme OFP variant)
     let mut header2 = [0u8; 2];
     if file.read_exact(&mut header2).is_ok() && &header2 == b"PK" {
-        println!("[!] Password-protected ZIP container detected in Realme OFP archive.");
-        return extract_realme_zip_ofp(ofp_path, out_dir, target_partition);
+        return extract_realme_zip_ofp(ofp_path, out_dir, target_partition, reporter);
     }
 
     if keys.ofp_keysets.is_empty() {
@@ -51,18 +63,10 @@ pub fn extract_ofp_partition(
     }
 
     let page_size = detect_page_size(&mut file, file_size)?;
-    println!(
-        "[+] Detected OFP page size: {:#x} ({} bytes)",
-        page_size, page_size
-    );
 
     // Locate and decrypt XML manifest using key triplets
-    let (matched_triplet, key, iv, xml_data) =
+    let (_matched_triplet, key, iv, xml_data) =
         find_and_decrypt_xml(&mut file, file_size, page_size, keys)?;
-    println!(
-        "[+] Successfully matched OFP keyset: {}",
-        matched_triplet.name
-    );
 
     let xml_str = match String::from_utf8(xml_data.clone()) {
         Ok(s) => s,
@@ -73,16 +77,11 @@ pub fn extract_ofp_partition(
     let profile_path = out_dir.join("ProFile.xml");
     fs::write(&profile_path, &xml_data)
         .with_context(|| format!("Failed to write {}", profile_path.display()))?;
-    println!("[+] Saved partition manifest to {}", profile_path.display());
 
     // Parse items from ProFile.xml
     let items = parse_profile_xml(&xml_str, page_size)?;
-    println!(
-        "[+] Discovered {} partition/file items in ProFile.xml",
-        items.len()
-    );
 
-    let mut extracted_count = 0;
+    let mut filtered_items = Vec::new();
     for item in items {
         if let Some(target) = target_partition {
             let target_lower = target.to_lowercase();
@@ -103,12 +102,10 @@ pub fn extract_ofp_partition(
                 continue;
             }
         }
-
-        extract_single_item(&mut file, &item, out_dir, ofp_path, &key, &iv)?;
-        extracted_count += 1;
+        filtered_items.push(item);
     }
 
-    if extracted_count == 0 {
+    if filtered_items.is_empty() {
         if let Some(target) = target_partition {
             bail!(
                 "No partition matching '{}' was found in ProFile.xml",
@@ -119,12 +116,47 @@ pub fn extract_ofp_partition(
         }
     }
 
-    println!(
-        "\n[+] Extraction complete! Successfully processed {} partition(s) into: {}",
-        extracted_count,
-        out_dir.display()
-    );
-    Ok(())
+    let total_bytes: u64 = filtered_items.iter().map(|it| it.rlength).sum();
+    reporter.on_event(ProgressEvent::Started {
+        total_items: filtered_items.len(),
+        total_bytes,
+    });
+
+    let mut cumulative_done = 0u64;
+    let mut results = Vec::new();
+
+    for item in filtered_items {
+        if reporter.is_cancelled() {
+            return Err(OzipError::Cancelled.into());
+        }
+
+        reporter.on_event(ProgressEvent::ItemStarted {
+            name: item.filename.clone(),
+            size: item.rlength,
+        });
+
+        let status = extract_single_item(
+            &mut file,
+            &item,
+            out_dir,
+            ofp_path,
+            &key,
+            &iv,
+            reporter,
+            &mut cumulative_done,
+            total_bytes,
+        )?;
+
+        reporter.on_event(ProgressEvent::ItemDone {
+            name: item.filename.clone(),
+            checksum: status,
+        });
+
+        results.push((item.filename, item.rlength, status));
+    }
+
+    reporter.on_event(ProgressEvent::Finished);
+    Ok(results)
 }
 
 pub(crate) fn detect_page_size(file: &mut File, file_size: u64) -> Result<u64> {
@@ -325,9 +357,19 @@ fn parse_element_item(
     }))
 }
 
-fn copy_stream<R: Read, W: Write>(reader: &mut R, writer: &mut W, mut length: u64) -> Result<()> {
+fn copy_stream<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    mut length: u64,
+    reporter: &dyn ProgressReporter,
+    cumulative_done: &mut u64,
+    total_bytes: u64,
+) -> Result<()> {
     let mut buf = [0u8; 64 * 1024];
     while length > 0 {
+        if reporter.is_cancelled() {
+            return Err(OzipError::Cancelled.into());
+        }
         let to_read = std::cmp::min(length, buf.len() as u64) as usize;
         let n = reader.read(&mut buf[..to_read])?;
         if n == 0 {
@@ -335,20 +377,37 @@ fn copy_stream<R: Read, W: Write>(reader: &mut R, writer: &mut W, mut length: u6
         }
         writer.write_all(&buf[..n])?;
         length -= n as u64;
+        *cumulative_done += n as u64;
+        reporter.on_event(ProgressEvent::Progress {
+            bytes_done: *cumulative_done,
+            bytes_total: total_bytes,
+        });
     }
     Ok(())
 }
 
-#[allow(clippy::manual_is_multiple_of)]
+#[allow(clippy::manual_is_multiple_of, clippy::too_many_arguments)]
 fn extract_single_item(
     src_file: &mut File,
     item: &OfpPartitionItem,
     out_dir: &Path,
-    _ofp_path: &Path,
+    ofp_path: &Path,
     key: &[u8; 16],
     iv: &[u8; 16],
-) -> Result<()> {
+    reporter: &dyn ProgressReporter,
+    cumulative_done: &mut u64,
+    total_bytes: u64,
+) -> Result<ChecksumStatus> {
     let target_path = crate::crypto::safe_join(out_dir, &item.filename)?;
+
+    if let (Ok(src_c), Ok(dst_c)) = (ofp_path.canonicalize(), target_path.canonicalize()) {
+        if src_c == dst_c {
+            bail!(
+                "Refusing to overwrite input archive: {}",
+                ofp_path.display()
+            );
+        }
+    }
 
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent)?;
@@ -356,51 +415,84 @@ fn extract_single_item(
 
     let rlength = item.rlength;
     if rlength == 0 {
-        return Ok(());
+        return Ok(ChecksumStatus::NoHashInManifest);
     }
 
-    println!("[*] Extracting: {} ({} bytes)", item.filename, rlength);
+    let part_path = target_path.with_extension(format!(
+        "{}.part",
+        target_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+    ));
 
     src_file.seek(SeekFrom::Start(item.start))?;
 
-    if item.is_copy_only {
-        // Unencrypted copy
-        let mut out = File::create(&target_path)?;
-        copy_stream(src_file, &mut out, item.length)?;
-        verify_checksums(&target_path, &item.sha256, &item.md5, true)?;
-    } else {
-        // Encrypted partition: decrypt header with AES-128-CFB, copy remaining payload
-        let mut out = File::create(&target_path)?;
-        let decrypt_len = std::cmp::min(item.decrypt_size, rlength as usize);
+    let res = (|| -> Result<ChecksumStatus> {
+        let mut out = File::create(&part_path)?;
 
-        let mut enc_head = vec![0u8; decrypt_len];
-        src_file.read_exact(&mut enc_head)?;
-
-        // AES-CFB requires 4-byte padding on decrypt blocks if size % 4 != 0
-        let padded_len = if decrypt_len % 4 != 0 {
-            decrypt_len + (4 - (decrypt_len % 4))
+        if item.is_copy_only {
+            // Unencrypted copy
+            copy_stream(
+                src_file,
+                &mut out,
+                item.length,
+                reporter,
+                cumulative_done,
+                total_bytes,
+            )?;
         } else {
-            decrypt_len
-        };
-        let mut pad_buf = enc_head.clone();
-        pad_buf.resize(padded_len, 0u8);
+            // Encrypted partition: decrypt header with AES-128-CFB, copy remaining payload
+            let decrypt_len = std::cmp::min(item.decrypt_size, rlength as usize);
+            let mut enc_head = vec![0u8; decrypt_len];
+            src_file.read_exact(&mut enc_head)?;
 
-        let cipher = Aes128Cfb::new(key.into(), iv.into());
-        cipher.decrypt(&mut pad_buf);
+            let padded_len = if decrypt_len % 4 != 0 {
+                decrypt_len + (4 - (decrypt_len % 4))
+            } else {
+                decrypt_len
+            };
+            let mut pad_buf = enc_head.clone();
+            pad_buf.resize(padded_len, 0u8);
 
-        out.write_all(&pad_buf[..decrypt_len])?;
+            let cipher = Aes128Cfb::new(key.into(), iv.into());
+            cipher.decrypt(&mut pad_buf);
 
-        // Copy remaining plain partition content
-        if rlength as usize > decrypt_len {
-            let remain = rlength - (decrypt_len as u64);
-            copy_stream(src_file, &mut out, remain)?;
+            out.write_all(&pad_buf[..decrypt_len])?;
+            *cumulative_done += decrypt_len as u64;
+            reporter.on_event(ProgressEvent::Progress {
+                bytes_done: *cumulative_done,
+                bytes_total: total_bytes,
+            });
+
+            // Copy remaining plain partition content
+            if rlength as usize > decrypt_len {
+                let remain = rlength - (decrypt_len as u64);
+                copy_stream(
+                    src_file,
+                    &mut out,
+                    remain,
+                    reporter,
+                    cumulative_done,
+                    total_bytes,
+                )?;
+            }
         }
 
         out.flush()?;
-        verify_checksums(&target_path, &item.sha256, &item.md5, false)?;
+        drop(out);
+
+        let chk_status = verify_checksums(&part_path, &item.sha256, &item.md5, item.is_copy_only)?;
+        fs::rename(&part_path, &target_path)?;
+        Ok(chk_status)
+    })();
+
+    if let Err(e) = res {
+        let _ = fs::remove_file(&part_path);
+        return Err(e);
     }
 
-    Ok(())
+    res
 }
 
 pub fn verify_checksums(
@@ -408,7 +500,7 @@ pub fn verify_checksums(
     sha256_sum: &str,
     md5_sum: &str,
     is_copy: bool,
-) -> Result<()> {
+) -> Result<ChecksumStatus> {
     let mode_str = if is_copy { "Copy" } else { "Decrypt" };
     let mut f = File::open(file_path)?;
     let metadata_len = f.metadata()?.len();
@@ -425,6 +517,7 @@ pub fn verify_checksums(
     }
 
     let mut sha256_verified = true;
+    let mut full_file_sha256_matched = false;
     if !sha256_sum.is_empty() {
         let mut matches = false;
         // Test SHA256 of first 0x40000 bytes OR total file length (matches Kerler's verification)
@@ -458,6 +551,9 @@ pub fn verify_checksums(
             let digest_str = format!("{:x}", hasher.finalize());
             if digest_str.eq_ignore_ascii_case(sha256_sum) {
                 matches = true;
+                if limit.is_none() {
+                    full_file_sha256_matched = true;
+                }
                 break;
             }
         }
@@ -483,50 +579,84 @@ pub fn verify_checksums(
 
     if is_failure {
         bail!(
-            "{}: Checksum verification failed! (md5_ok: {}, sha256_ok: {})",
+            "{}: Checksum verification failed for {} (md5_ok: {}, sha256_ok: {})",
             mode_str,
+            file_path.display(),
             md5_verified,
             sha256_verified
         );
-    } else {
-        let status = if has_md5 && has_sha256 && (md5_bad || sha256_bad) {
-            format!("(md5_ok: {}, sha256_ok: {})", md5_verified, sha256_verified)
-        } else {
-            "successfully".to_string()
-        };
-        println!("  [+] {}: Verified checksums {}.", mode_str, status);
     }
 
-    Ok(())
+    if !has_md5 && !has_sha256 {
+        Ok(ChecksumStatus::NoHashInManifest)
+    } else if full_file_sha256_matched {
+        Ok(ChecksumStatus::VerifiedFull)
+    } else {
+        Ok(ChecksumStatus::VerifiedHeadOnly)
+    }
 }
 
 fn extract_realme_zip_ofp(
     ofp_path: &Path,
     out_dir: &Path,
     target_partition: Option<&str>,
-) -> Result<()> {
+    reporter: &dyn ProgressReporter,
+) -> Result<Vec<(String, u64, ChecksumStatus)>> {
     let zippw = b"flash@realme$50E7F7D847732396F1582CD62DD385ED7ABB0897";
-    println!("[*] Extracting password-protected Realme OFP archive...");
     let file = File::open(ofp_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let mut count = 0;
+    let mut entries_to_extract = Vec::new();
 
     for i in 0..archive.len() {
+        if let Ok(zfile) = archive.by_index(i) {
+            let raw_name = zfile.name().unwrap_or_default().to_string();
+            if raw_name.ends_with('/') {
+                continue;
+            }
+            if let Some(target) = target_partition {
+                let target_lower = target.to_lowercase();
+                if !raw_name.to_lowercase().contains(&target_lower) {
+                    continue;
+                }
+            }
+            entries_to_extract.push((i, raw_name, zfile.size()));
+        }
+    }
+
+    if entries_to_extract.is_empty() {
+        if let Some(target) = target_partition {
+            bail!(
+                "No partition matching '{}' found in Realme ZIP archive.",
+                target
+            );
+        } else {
+            bail!("No files extracted from Realme ZIP archive.");
+        }
+    }
+
+    let total_bytes: u64 = entries_to_extract.iter().map(|(_, _, s)| *s).sum();
+    reporter.on_event(ProgressEvent::Started {
+        total_items: entries_to_extract.len(),
+        total_bytes,
+    });
+
+    let mut cumulative_done = 0u64;
+    let mut results = Vec::new();
+
+    for (i, raw_name, size) in entries_to_extract {
+        if reporter.is_cancelled() {
+            return Err(OzipError::Cancelled.into());
+        }
+
+        reporter.on_event(ProgressEvent::ItemStarted {
+            name: raw_name.clone(),
+            size,
+        });
+
         let mut zfile = match archive.by_index_decrypt(i, zippw) {
             Ok(f) => f,
             Err(e) => bail!("Failed to read/decrypt Realme ZIP entry {}: {}", i, e),
         };
-        let raw_name = zfile.name()?.to_string();
-        if raw_name.ends_with('/') {
-            continue;
-        }
-
-        if let Some(target) = target_partition {
-            let target_lower = target.to_lowercase();
-            if !raw_name.to_lowercase().contains(&target_lower) {
-                continue;
-            }
-        }
 
         let out_file_path = crate::crypto::safe_join(out_dir, &raw_name)?;
         if let (Ok(src_c), Ok(dst_c)) = (ofp_path.canonicalize(), out_file_path.canonicalize()) {
@@ -550,14 +680,24 @@ fn extract_realme_zip_ofp(
                 .unwrap_or("")
         ));
 
-        println!(
-            "[*] Extracting \"{}\" to {}...",
-            raw_name,
-            out_file_path.display()
-        );
         let write_res = (|| -> Result<()> {
             let mut out = File::create(&part_path)?;
-            std::io::copy(&mut zfile, &mut out)?;
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                if reporter.is_cancelled() {
+                    return Err(OzipError::Cancelled.into());
+                }
+                let n = zfile.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                out.write_all(&buf[..n])?;
+                cumulative_done += n as u64;
+                reporter.on_event(ProgressEvent::Progress {
+                    bytes_done: cumulative_done,
+                    bytes_total: total_bytes,
+                });
+            }
             out.flush()?;
             Ok(())
         })();
@@ -568,23 +708,15 @@ fn extract_realme_zip_ofp(
         }
 
         fs::rename(&part_path, &out_file_path)?;
-        count += 1;
+
+        reporter.on_event(ProgressEvent::ItemDone {
+            name: raw_name.clone(),
+            checksum: ChecksumStatus::NoHashInManifest,
+        });
+
+        results.push((raw_name, size, ChecksumStatus::NoHashInManifest));
     }
 
-    if count == 0 {
-        if let Some(target) = target_partition {
-            bail!(
-                "No partition matching '{}' found in Realme ZIP archive.",
-                target
-            );
-        } else {
-            bail!("No files extracted from Realme ZIP archive.");
-        }
-    }
-
-    println!(
-        "[+] Successfully extracted {} file(s) from Realme OFP ZIP.",
-        count
-    );
-    Ok(())
+    reporter.on_event(ProgressEvent::Finished);
+    Ok(results)
 }

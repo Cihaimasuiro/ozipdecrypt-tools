@@ -1230,6 +1230,100 @@ mod tests {
     }
 
     #[test]
+    fn test_cancel_mid_extraction_leaves_no_partial_output() {
+        use ozipdecrypt_core::reporter::{ProgressEvent, ProgressReporter};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        struct CancellingReporter {
+            cancelled: Arc<AtomicBool>,
+        }
+
+        impl ProgressReporter for CancellingReporter {
+            fn on_event(&self, event: ProgressEvent) {
+                if let ProgressEvent::ItemStarted { ref name, .. } = event {
+                    if name == "part2.img" {
+                        self.cancelled.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+            fn is_cancelled(&self) -> bool {
+                self.cancelled.load(Ordering::SeqCst)
+            }
+        }
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "cancel_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let ops_file = tmp_dir.join("test.ops");
+        let out_dir = tmp_dir.join("out");
+
+        let sbox = hex::decode(ops::SBOX_HEX).unwrap();
+        let item1_data = vec![0x11u8; 65536];
+        let item2_data = vec![0x22u8; 65536];
+        let mut container = Vec::new();
+
+        let enc1 = ops::key_custom_decrypt(&item1_data, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        let start1 = container.len() as u64;
+        container.extend(enc1);
+
+        let enc2 = ops::key_custom_decrypt(&item2_data, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        let start2 = container.len() as u64;
+        container.extend(enc2);
+
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><data><Sahara>\
+             <File Path=\"part1.img\" FileOffsetInSrc=\"{}\" SizeInByteInSrc=\"{}\"/>\
+             <File Path=\"part2.img\" FileOffsetInSrc=\"{}\" SizeInByteInSrc=\"{}\"/>\
+             </Sahara></data>",
+            start1 / 0x200,
+            item1_data.len(),
+            start2 / 0x200,
+            item2_data.len()
+        );
+        let xml_bytes = xml.as_bytes();
+        let enc_xml = ops::key_custom_decrypt(xml_bytes, ops::MASTER_KEY, &ops::MBOX5, &sbox);
+        let pad = (0x200 - (enc_xml.len() % 0x200)) % 0x200;
+        let mut padded_xml = enc_xml.clone();
+        padded_xml.resize(enc_xml.len() + pad, 0u8);
+
+        let mut trailer = vec![0u8; 0x200];
+        trailer[0x18..0x1C].copy_from_slice(&(xml_bytes.len() as u32).to_le_bytes());
+
+        let mut ops_bytes = container;
+        ops_bytes.extend(padded_xml);
+        ops_bytes.extend(trailer);
+
+        std::fs::write(&ops_file, &ops_bytes).unwrap();
+
+        let cancelled_flag = Arc::new(AtomicBool::new(false));
+        let reporter = CancellingReporter {
+            cancelled: cancelled_flag.clone(),
+        };
+
+        let res = ops::extract_ops_with_reporter(&ops_file, &out_dir, None, &reporter);
+        assert!(res.is_err(), "Extraction must fail on cancel");
+
+        let part2_final = out_dir.join("part2.img");
+        let part2_part = out_dir.join("part2.img.part");
+        assert!(
+            !part2_final.exists(),
+            "Cancelled item must not exist as final output"
+        );
+        assert!(
+            !part2_part.exists(),
+            "Cancelled item must not leave a dangling .part file"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
     fn test_ofp_checksum_verification_rules() {
         let tmp_dir = std::env::temp_dir();
         let test_file = tmp_dir.join("test_checksum_verify.bin");

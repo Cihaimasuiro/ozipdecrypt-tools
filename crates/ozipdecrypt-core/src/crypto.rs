@@ -206,7 +206,6 @@ pub fn keytest(data: &[u8; 16], candidate_keys: &[String]) -> Option<[u8; 16]> {
                 cipher.decrypt_block(&mut block);
                 let magic = &block[0..4];
                 if magic == b"\x50\x4B\x03\x04" || magic == b"AVB0" || magic == b"ANDR" {
-                    println!("[+] Found correct AES key: {}", key_hex);
                     return Some(key_bytes);
                 }
             }

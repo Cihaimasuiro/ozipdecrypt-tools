@@ -15,6 +15,20 @@ pub enum ContainerType {
     Unknown,
 }
 
+impl ContainerType {
+    pub fn verification_level(&self) -> crate::info::VerificationLevel {
+        match self {
+            ContainerType::OfpQualcomm => crate::info::VerificationLevel::Verified,
+            ContainerType::Ozip | ContainerType::OfpMediaTek | ContainerType::OnePlusOps => {
+                crate::info::VerificationLevel::SyntheticOnly
+            }
+            ContainerType::StandardZip | ContainerType::Unknown => {
+                crate::info::VerificationLevel::Unverified
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for ContainerType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -223,6 +237,7 @@ pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
 
     let mut partitions = Vec::new();
     let mut chipset = None;
+    let mut project = None;
 
     if container_type == ContainerType::Ozip || container_type == ContainerType::StandardZip {
         if let Ok(file) = File::open(path) {
@@ -236,6 +251,7 @@ pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
                                 name,
                                 size,
                                 is_encrypted: container_type == ContainerType::Ozip,
+                                has_checksum: false,
                                 checksum: None,
                             });
                         }
@@ -253,25 +269,28 @@ pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
                     let xml_str = String::from_utf8_lossy(&xml_bytes);
                     if let Ok(items) = crate::ofp::parse_profile_xml(&xml_str, page_size) {
                         for item in items {
+                            let checksum = if !item.sha256.is_empty() {
+                                Some(item.sha256)
+                            } else if !item.md5.is_empty() {
+                                Some(item.md5)
+                            } else {
+                                None
+                            };
                             partitions.push(PartitionMeta {
                                 name: item.filename,
                                 size: item.rlength,
                                 is_encrypted: !item.is_copy_only,
-                                checksum: if !item.sha256.is_empty() {
-                                    Some(item.sha256)
-                                } else if !item.md5.is_empty() {
-                                    Some(item.md5)
-                                } else {
-                                    None
-                                },
+                                has_checksum: checksum.is_some(),
+                                checksum,
                             });
                         }
                     }
                     if let Some(pos) = xml_str.find("Project=\"") {
                         let sub = &xml_str[pos + 9..];
                         if let Some(end) = sub.find('"') {
-                            let prj = &sub[..end];
+                            let prj = sub[..end].to_string();
                             chipset = Some(format!("Qualcomm Snapdragon (Project: {})", prj));
+                            project = Some(prj);
                         }
                     }
                 }
@@ -283,15 +302,17 @@ pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
                 if let Ok((xml_str, _)) = crate::ops::extract_ops_xml(&mut f, file_size, &sbox) {
                     if let Ok(items) = crate::ops::parse_ops_xml(&xml_str) {
                         for item in items {
+                            let checksum = if !item.sha256.is_empty() {
+                                Some(item.sha256)
+                            } else {
+                                None
+                            };
                             partitions.push(PartitionMeta {
                                 name: item.filename,
                                 size: item.length,
                                 is_encrypted: item.is_encrypted,
-                                checksum: if !item.sha256.is_empty() {
-                                    Some(item.sha256)
-                                } else {
-                                    None
-                                },
+                                has_checksum: checksum.is_some(),
+                                checksum,
                             });
                         }
                     }
@@ -313,11 +334,10 @@ pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
                         .trim()
                         .to_string();
                     if !cpu.is_empty() {
-                        chipset = Some(if !prj.is_empty() {
-                            format!("{} (Project: {})", cpu, prj)
-                        } else {
-                            cpu
-                        });
+                        chipset = Some(cpu);
+                    }
+                    if !prj.is_empty() {
+                        project = Some(prj);
                     }
                 }
             }
@@ -326,9 +346,11 @@ pub fn describe_container(path: &Path) -> Result<ContainerInfo> {
 
     Ok(ContainerInfo {
         container_type,
+        verification_level: container_type.verification_level(),
         file_size,
         details,
         chipset,
+        project,
         partitions,
     })
 }
