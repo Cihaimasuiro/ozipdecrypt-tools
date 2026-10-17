@@ -76,10 +76,12 @@ impl ProgressReporter for GuiReporter {
                 // Ensure any pending throttled progress is forwarded before ItemDone so progress bar reaches 100%
                 if let Ok(mut pending) = self.pending_progress.lock() {
                     if let Some((done, total)) = pending.take() {
-                        let _ = self.tx.send(WorkerMessage::Progress(ProgressEvent::Progress {
-                            bytes_done: done,
-                            bytes_total: total,
-                        }));
+                        let _ = self
+                            .tx
+                            .send(WorkerMessage::Progress(ProgressEvent::Progress {
+                                bytes_done: done,
+                                bytes_total: total,
+                            }));
                     }
                 }
                 let _ = self.tx.send(WorkerMessage::Progress(event));
@@ -89,10 +91,12 @@ impl ProgressReporter for GuiReporter {
                 // Flush any pending progress before final finish event
                 if let Ok(mut pending) = self.pending_progress.lock() {
                     if let Some((done, total)) = pending.take() {
-                        let _ = self.tx.send(WorkerMessage::Progress(ProgressEvent::Progress {
-                            bytes_done: done,
-                            bytes_total: total,
-                        }));
+                        let _ = self
+                            .tx
+                            .send(WorkerMessage::Progress(ProgressEvent::Progress {
+                                bytes_done: done,
+                                bytes_total: total,
+                            }));
                     }
                 }
                 let _ = self.tx.send(WorkerMessage::Progress(event));
