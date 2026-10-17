@@ -137,7 +137,7 @@ The project enforces strict separation between algorithms verified on real firmw
 
 1. **Cipher Span**: The AES-128-CFB cipher operates on the first `0x40000` bytes (256 KB) of each partition. Trailing data is streamed directly.
 2. **Sparse Image Checksums**: Manifest SHA-256 for sparse images (`system`, `vendor`, `userdata`, `persist`) is calculated on the unsparsed partition, so only the container header MD5 can be verified against the file.
-3. **Source Verification**: Container integrity was proven independently by checking the `.ofp` against the package vendor's `md5sum.md5` (`df77948243b6f97aac579b99b7c37b0b`), matching bit-for-bit.
+3. **Source Verification**: The `.ofp` container file was checked against the package's bundled `md5sum.md5` (`df77948243b6f97aac579b99b7c37b0b`), verifying the 8.16 GB archive was not corrupted in transfer.
 4. **Hard-Fail Policy**: Rust enforces strict termination: if both MD5 and SHA-256 fail (or the only provided hash fails), extraction aborts immediately.
 5. **Sample Scope**: Verified on Oppo A7 CPH1901 (Qualcomm SDM450, Keyset V1.6.6+). Other keysets are validated via automated constants audit and derived-key vectors.
 

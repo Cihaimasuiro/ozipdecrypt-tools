@@ -14,7 +14,7 @@ Before partition extraction, the container file was audited against the vendor's
 - **Expected MD5 (`md5sum.md5`)**: `df77948243b6f97aac579b99b7c37b0b  ./MSM_18571.ofp`
 - **Computed File MD5**: `df77948243b6f97aac579b99b7c37b0b`
 - **Computed File Size**: 8,556,678,144 bytes (8,160.28 MB)
-- **Result**: **100% BIT-FOR-BIT MATCH**
+- **Result**: **100% BIT-FOR-BIT MATCH** (verifies container was not corrupted in transfer)
 
 ---
 
@@ -37,7 +37,7 @@ All 61 partition items listed in `ProFile.xml` were extracted and checked:
 
 | Partition Item | Size | Type / Mode | Status |
 |---|---|---|---|
-| `prog_emmc_firehose_8953_ddr.mbn` | 442,728 B | Sahara plain | Verified |
+| `prog_emmc_firehose_8953_ddr.mbn` | 442,728 B | Sahara plain | Extracted (no hash in manifest) |
 | `dynamic_nvbk.bin` | 10,485,760 B | AES-CFB encrypted | Verified MD5 & SHA-256 |
 | `static_nvbk.bin` | 10,485,760 B | AES-CFB encrypted | Verified MD5 & SHA-256 |
 | `persist.img` | 5,132,700 B | Sparse AES-CFB | Verified Header MD5 (`ea8a3c21a1349a3a802405a3dc2dcfca`) |
@@ -82,9 +82,9 @@ All 61 partition items listed in `ProFile.xml` were extracted and checked:
 | `oppo18571.bin` | 956 B | AES-CFB encrypted | Verified Header MD5 |
 | `gpt_main2.bin` | 17,408 B | AES-CFB encrypted | Verified MD5 & SHA-256 |
 | `gpt_backup2.bin` | 16,896 B | AES-CFB encrypted | Verified MD5 & SHA-256 |
-| XML & Partition Manifests (6 items) | Various | Plain/Decrypted | Verified |
-| ChainedTableOfDigests (5 items) | Various | Copy only | Verified |
-| DigestsToSign (5 items) | Various | Copy only | Verified |
+| XML & Partition Manifests (6 items) | Various | Plain/Decrypted | Extracted (no hash in manifest) |
+| ChainedTableOfDigests (5 items) | Various | Copy only | Verified (matches signature digest) |
+| DigestsToSign (5 items) | Various | Copy only | Verified (matches signature digest) |
 
 ---
 
